@@ -1,0 +1,11 @@
+settings set target.process.stop-on-sharedlibrary-events false
+process handle SIGSEGV -s true -n true -p false
+process handle SIGBUS -s true -n true -p false
+process handle SIGABRT -s true -n true -p false
+continue
+thread list
+thread backtrace all
+register read x0 x1 x2 x3 x4 x5 x6 x7 x8 x9 x10 x11 x12 x13 x14 x15 x16 x17 x18 x19 x20 x21 x22 x23 x24 x25 x26 x27 x28 fp lr sp pc cpsr far esr
+image lookup -a $pc
+disassemble --start-address `$pc-32` --count 20
+memory read --format x --size 8 --count 16 $sp

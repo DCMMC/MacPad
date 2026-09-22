@@ -1,0 +1,4 @@
+settings set target.x86-disassembly-flavor intel
+image lookup -n '__ZN12MetalContext19EndCurrentCompositeEv'
+image lookup -n '__ZN12MetalContext14StartCompositeEPU21objcproto10MTLTexture11objc_object13MTLLoadAction14MTLStoreAction'
+disassemble -n '__ZN12MetalContext19EndCurrentCompositeEv' -c 80

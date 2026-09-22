@@ -1,0 +1,6 @@
+image list -o -f QuartzCore
+disassemble --start-address 0x1a6f41970 --count 64
+disassemble --start-address 0x1a6f3ea70 --count 96
+disassemble --start-address 0x1a70cf8b0 --count 96
+disassemble --start-address 0x1a6f3f540 --count 64
+disassemble --start-address 0x1a6f3ec00 --count 64

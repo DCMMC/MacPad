@@ -1,0 +1,6 @@
+# misc/lldb_trace_initimpl.lldb — runs the AGX initImpl tracer.
+# Sourced by Mac lldb after `process connect`. Loads the python module
+# which sets breakpoints in its __lldb_init_module hook, then `continue`s.
+
+command script import misc/lldb_trace_initimpl.py
+continue

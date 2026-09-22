@@ -1,0 +1,9 @@
+settings set target.process.stop-on-sharedlibrary-events false
+process status
+image list -o -f IOGPU
+image lookup -rn 'IOGPUMetalCommandBuffer'
+image lookup -rn 'IOGPUMetalCommandQueue'
+image lookup -rn 'commandBuffer.*[Ee]rror'
+image lookup -rn '[Cc]allback.*[Cc]ommandBuffer'
+process detach
+quit

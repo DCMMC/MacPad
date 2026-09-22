@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+    <dict>
+        <key>choiceAttribute</key>
+        <string>selected</string>
+        <key>attributeSetting</key>
+        <integer>0</integer>
+        <key>choiceIdentifier</key>
+        <string>com.microsoft.OneDrive</string>
+    </dict>
+    <dict>
+        <key>choiceAttribute</key>
+        <string>selected</string>
+        <key>attributeSetting</key>
+        <integer>0</integer>
+        <key>choiceIdentifier</key>
+        <string>com.microsoft.defender.shim</string>
+    </dict>
+</array>
+</plist>

@@ -1,0 +1,15 @@
+# Read-only, bounded trace of the macOS 13.4 QuartzCore IOMFB page lifecycle.
+# The local extracted QuartzCore and the running image both have UUID
+# cf853bbd-01b6-3f46-ada1-ec70fd2dc9dc.  Static image base is 0x1879be000;
+# the Python helper derives the current ASLR slide from the loaded module.
+command script import misc/lldb_trace_iomfb_page_lifecycle.py
+script import lldb_trace_iomfb_page_lifecycle as macws_iomfb_page_lifecycle
+script macws_iomfb_page_lifecycle.install(lldb.debugger.GetSelectedTarget(), 24)
+process continue
+script macws_iomfb_page_lifecycle.dump_summary()
+thread backtrace
+# Leave the job stopped only long enough for the outer runner to detach and
+# unload it.  Killing a MachServices job makes launchd immediately respawn it;
+# detaching avoids that restart loop, while the device-side failsafe used by
+# the trace run still unloads the complete GUI stack if SSH changes address.
+process detach

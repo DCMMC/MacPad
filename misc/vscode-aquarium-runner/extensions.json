@@ -1,0 +1,28 @@
+[
+  {
+    "identifier": {
+      "id": "macwsguide.macws-aquarium-runner"
+    },
+    "version": "0.0.2",
+    "location": {
+      "$mid": 1,
+      "path": "/tmp/macws-vscode-extensions/macwsguide.macws-aquarium-runner-0.0.2",
+      "scheme": "file"
+    },
+    "relativeLocation": "macwsguide.macws-aquarium-runner-0.0.2",
+    "metadata": {
+      "isApplicationScoped": false,
+      "isMachineScoped": false,
+      "isBuiltin": false,
+      "installedTimestamp": 1785369600000,
+      "pinned": false,
+      "source": "vsix",
+      "targetPlatform": "undefined",
+      "updated": false,
+      "private": true,
+      "isPreReleaseVersion": false,
+      "hasPreReleaseVersion": false,
+      "preRelease": false
+    }
+  }
+]

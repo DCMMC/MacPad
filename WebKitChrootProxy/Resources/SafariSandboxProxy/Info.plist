@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>SafariSandboxProxy</string>
+<key>CFBundleIdentifier</key><string>com.apple.macosbooter.Safari.SandboxBroker</string>
+<key>CFBundlePackageType</key><string>XPC!</string>
+<key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+<key>MinimumOSVersion</key><string>14.0</string>
+<key>LSUIElement</key><true/>
+<key>NSPrincipalClass</key><string>NSViewServiceApplication</string>
+<key>ViewService</key><dict><key>WantsMasquerade</key><false/></dict>
+<key>XPCService</key><dict>
+<key>JoinExistingSession</key><true/>
+<key>RunLoopType</key><string>_NSApplicationMain</string>
+<key>ServiceType</key><string>Application</string>
+</dict></dict></plist>

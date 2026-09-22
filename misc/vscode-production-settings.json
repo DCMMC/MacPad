@@ -1,0 +1,6 @@
+{
+    "chat.agentHost.enabled": false,
+    "terminal.integrated.enablePersistentSessions": false,
+    "macwsAquarium.url": "https://webglsamples.org/aquarium/aquarium.html?numFish=60000&canvasWidth=1024&canvasHeight=1024&fitWindow=false",
+    "macwsAquarium.openOnStartup": false
+}

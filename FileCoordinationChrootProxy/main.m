@@ -1,0 +1,5 @@
+#define MACWS_RELAY_PUBLIC_SERVICE "com.apple.ProgressReporting"
+#define MACWS_RELAY_PRIVATE_SERVICE "com.apple.macosbooter.ProgressReporting"
+#define MACWS_RELAY_LOG_PATH "/var/jb/var/mobile/progress-bridge.log"
+#define MACWS_RELAY_LOG_NAME "ProgressBridge"
+#include "Relay.inc"

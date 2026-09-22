@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.macwsguide.corelocationagent</string>
+    <key>POSIXSpawnType</key>
+    <string>Interactive</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/jb/usr/macOS/bin/launchdchrootexec</string>
+        <string>0</string>
+        <string>0</string>
+        <string>/var/mnt/rootfs</string>
+        <string>/System/Library/CoreServices/CoreLocationAgent.app/Contents/MacOS/CoreLocationAgent</string>
+    </array>
+    <key>MachServices</key>
+    <dict>
+        <key>com.apple.CoreLocation.agent</key>
+        <true/>
+    </dict>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>NSRunningFromLaunchd</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>StandardOutPath</key>
+    <string>/var/jb/var/mobile/corelocationagent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/jb/var/mobile/corelocationagent.log</string>
+</dict>
+</plist>

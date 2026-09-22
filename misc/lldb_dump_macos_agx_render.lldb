@@ -1,0 +1,3 @@
+settings set target.process.stop-on-sharedlibrary-events false
+command script import misc/lldb_dump_macos_agx_render.py
+script lldb_dump_macos_agx_render.dump(lldb.debugger)

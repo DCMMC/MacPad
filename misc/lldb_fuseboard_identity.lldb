@@ -1,0 +1,12 @@
+# Attach the project LLDB helper to UIKitSystem first, then run this file:
+#
+#   SESSION=ioslldb_uikit bash misc/ios_lldb_tmux.sh attach IP 2222 UIKitSystem
+#   SESSION=ioslldb_uikit bash misc/ios_lldb_tmux.sh cmd \
+#       'command source /var/jb/var/mobile/MacWSBootingGuide/misc/lldb_fuseboard_identity.lldb'
+#
+# Symbolic lookup deliberately replaces the old hard-coded shared-cache
+# address: ASLR moved FuseBoard from 0x2116... to 0x224f... across otherwise
+# identical UIKitSystem launches on the same target.
+image list -o -f FuseBoard
+image lookup -n "+[RBSProcessHandle(FuseBoard) fu_handleForIdentifier:]"
+disassemble -n "+[RBSProcessHandle(FuseBoard) fu_handleForIdentifier:]"

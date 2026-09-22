@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.macwsguide.keychain</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/jb/usr/macOS/bin/macwskeychaind</string>
+    </array>
+    <key>UserName</key>
+    <string>mobile</string>
+    <key>GroupName</key>
+    <string>mobile</string>
+    <key>MachServices</key>
+    <dict>
+        <key>com.macwsguide.keychain</key>
+        <true/>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>/var/mobile/Library/Logs/MacWSKeychaind.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/mobile/Library/Logs/MacWSKeychaind.log</string>
+</dict>
+</plist>

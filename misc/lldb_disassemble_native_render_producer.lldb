@@ -1,0 +1,9 @@
+# Actual iOS 16.3 render-pass producer reached by the 1140x798 clear field
+# watchpoints.  Addresses are current-boot shared-cache addresses.
+image lookup --address 0x221ae19b8
+disassemble --start-address 0x221ae1600 --count 520
+image lookup --address 0x221a0e044
+disassemble --start-address 0x221a0e044 --count 180
+image list -o -f
+detach
+quit

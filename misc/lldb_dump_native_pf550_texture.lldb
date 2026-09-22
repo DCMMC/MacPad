@@ -1,0 +1,14 @@
+settings set target.process.stop-on-sharedlibrary-events false
+command script import misc/lldb_dump_native_texture.py
+# iPad13,6 iOS 16.3.1 (20D67), AGXMetal13_3 shared-cache runtime address.
+# This is the instruction immediately after the call to the IOGPU IOSurface
+# texture initializer in the native AGX newTexture path.
+breakpoint set --address 0x2262f1554
+continue
+register read x0 x20 x21 x22 x23 x24 x25 sp pc
+thread backtrace
+script lldb_dump_native_texture.arm_caller_return(lldb.debugger)
+continue
+register read x0 x19 x20 x21 x22 x23 x24 x25 sp pc
+thread backtrace
+script lldb_dump_native_texture.dump_current(lldb.debugger)

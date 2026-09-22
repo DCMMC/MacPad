@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Steam's macOS libsteam_api asks launchd for this exact Mach service
+      before it can discover the client install and create its IPC pipe.  The
+      stock per-user LaunchAgent cannot be scanned from the chroot by iOS
+      launchd, so publish the same contract while executing Valve's own
+      ipcserver through the normal chroot launcher.
+    -->
+    <key>Label</key>
+    <string>com.valvesoftware.steam.ipctool</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/jb/usr/macOS/bin/launchdchrootexec</string>
+        <string>501</string>
+        <string>501</string>
+        <string>/var/mnt/rootfs</string>
+        <string>/Users/root/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS/ipcserver</string>
+    </array>
+    <key>MachServices</key>
+    <dict>
+        <key>com.valvesoftware.steam.ipctool</key>
+        <true/>
+    </dict>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/root</string>
+        <key>USER</key>
+        <string>mobile</string>
+        <key>LOGNAME</key>
+        <string>mobile</string>
+        <key>TMPDIR</key>
+        <string>/tmp</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>StandardOutPath</key>
+    <string>/var/jb/var/mobile/steam-ipcserver.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/jb/var/mobile/steam-ipcserver.log</string>
+</dict>
+</plist>

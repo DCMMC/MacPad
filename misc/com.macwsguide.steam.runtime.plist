@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Optional runtime job for an installed Steam client.  It intentionally
+      lives under misc rather than the package LaunchDaemons directory: Steam
+      should start when the user requests it, not on every MacWS cold start.
+    -->
+    <key>Label</key>
+    <!-- RE-confirmed from this iPadOS 16.3 launchd: this prefix selects the
+         application job class.  Steam launches games as descendants of this
+         job, so an ordinary daemon label strands their CPU work in launchd's
+         energy-efficient coalition even when POSIXSpawnType is Interactive. -->
+    <string>UIKitApplication:com.macwsguide.steam</string>
+    <key>POSIXSpawnType</key>
+    <string>Interactive</string>
+    <key>ProgramArguments</key>
+    <array>
+        <!-- This short iOS-side preflight runs as the launchd job owner before
+             launchdchrootexec drops to uid/gid 501. A root-owned stale FIFO
+             from an interrupted older run made Steam's real NamedPipe open
+             fail with EACCES, leaving the updater onscreen after verification.
+             Jetsam can also kill steam_osx while leaving its random CEF
+             SingletonSocket and steamXXXXXX directories behind; the next
+             bootstrap then takes the existing-instance path and opens a
+             missing /tmp/steam.pipe with ENOENT. If and only if no live Steam
+             main process exists, retire those exact temporary namespaces.
+             Game data, htmlcache, login state and steamapps are untouched. -->
+        <string>/var/jb/usr/bin/bash</string>
+        <!-- A caller may place one decimal app ID in this one-shot control
+             file before loading the job. Pass it to the first, launchd-owned
+             Steam instance: a second steam_osx cannot discover the macOS
+             shared-memory singleton on this iPadOS host and would create an
+             unrelated SteamID=0 client instead of forwarding -applaunch. -->
+		<string>/var/jb/usr/macOS/bin/prepare_steam_runtime.sh</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key><string>/Users/root</string>
+        <key>USER</key><string>mobile</string>
+        <key>LOGNAME</key><string>mobile</string>
+        <key>TMPDIR</key><string>/tmp</string>
+        <key>CA_VSYNC_OFF</key><string>1</string>
+        <key>CA_DISABLE_SWAP_ICC</key><string>1</string>
+        <!-- Download-first production profile. Steam's CEF UI uses CPU page
+             compositing, while libmachook adds the supported Chromium flags
+             that prevent its separate SwiftShader/GPU rasterizer from
+             recreating the historical 9.16-GiB gpu-process footprint. This
+             variable is deliberately Steam-only; games and other MacWS apps
+             keep their own graphics policy. -->
+        <key>MACWS_STEAM_CPU_RENDERING</key><string>1</string>
+        <!-- iPadOS Security rejects valid macOS 4-KiB CodeDirectories before
+             NSWorkspace exec. The Steam-only adapter preserves the original
+             call, then atomically spawns a trustcached vendor executable with
+             Valve's original NSWorkspace argv/environment contract. -->
+        <key>MACWS_STEAM_APP_LAUNCH_COMPAT</key><string>1</string>
+        <!-- Keep Stray's public CAMetalLayer display-sync behavior unchanged
+             in production.  Runtime evidence on 2026-08-23 recorded a stable
+             49.94-FPS 30-second gameplay sample with displaySyncEnabled=YES;
+             the earlier sync-off A/B did not isolate this switch from thermal
+             history.  The exact-process gate remains available for bounded
+             diagnostics, but value 0 installs no behavior change. -->
+        <key>MACWS_STRAY_DISABLE_DISPLAY_SYNC</key><string>0</string>
+        <!-- Steam synchronously registers native game bundles through
+             LaunchServices, so its filesystem view needs the same logical
+             chroot-root mount contract as the other catalog consumers. -->
+        <key>MACWS_APP_MOUNT_COMPAT</key><string>1</string>
+        <!--
+          Steam's bundled SDL 3 controller backend blocks the AppKit main
+          thread on iPadOS while CHIDIO owns SDL's device mutex. Mouse,
+          keyboard and MacWS touch input use AppKit/CGEvent, not SDL joystick
+          enumeration, so disable only the unsupported controller backends.
+        -->
+        <key>SDL_JOYSTICK_HIDAPI</key><string>0</string>
+        <key>SDL_JOYSTICK_IOKIT</key><string>0</string>
+        <key>SDL_JOYSTICK_MFI</key><string>0</string>
+        <!-- Steam's CEF renderers use the same V8 MAP_JIT contract as the
+             production VS Code build. Keep W^X through libmachook's
+             page-granular RW/RX compatibility path. -->
+        <key>MACWS_JIT_MPROTECT_COMPAT</key><string>1</string>
+        <key>MACWS_JIT_FAULT_WRITE_COMPAT</key><string>1</string>
+        <!-- Chromium 126 imports __sandbox_ms("AMFI", 0x60, ...), which the
+             iOS kernel reports as ENOSYS even though its task ports are
+             hard-immovable. Expose that exact policy so Chromium takes its
+             built-in no-task-port path instead of sending mach_task_self()
+             and receiving EXC_GUARD/ILLEGAL_MOVE. -->
+        <key>MACWS_AMFI_IMMOVABLE_TASK_PORT_COMPAT</key><string>1</string>
+        <!-- Crashpad's macOS-only nonfatal CPsx simulated dump includes
+             mach_task_self() in exception_raise_state_identity. iPadOS rejects
+             that hard-immovable right with MACH_SEND_INVALID_RIGHT plus a
+             fatal EXC_GUARD. Preserve the same failed-dump return without
+             entering the fatal trap; real exception delivery is untouched. -->
+        <key>MACWS_CRASHPAD_IMMOVABLE_TASK_PORT_COMPAT</key><string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/var/jb/var/mobile/steam-runtime.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/jb/var/mobile/steam-runtime.log</string>
+</dict>
+</plist>

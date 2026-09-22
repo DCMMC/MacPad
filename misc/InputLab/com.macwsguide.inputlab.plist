@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.macwsguide.inputlab</string>
+    <key>POSIXSpawnType</key>
+    <string>Interactive</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/jb/usr/macOS/bin/launchdchrootexec</string>
+        <string>0</string>
+        <string>0</string>
+        <string>/var/mnt/rootfs</string>
+        <string>/usr/local/bin/MacWSInputLab</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <!-- Performance regression is zero-debug by default. Set the narrow
+         MACWS_INPUTLAB_DIAGNOSTICS variable in a temporary test job only when
+         collecting private AppKit boundary evidence. -->
+    <key>StandardOutPath</key>
+    <string>/var/jb/var/mobile/macws_inputlab.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/jb/var/mobile/macws_inputlab.log</string>
+</dict>
+</plist>

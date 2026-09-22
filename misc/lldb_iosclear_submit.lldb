@@ -1,0 +1,7 @@
+settings set target.process.stop-on-sharedlibrary-events false
+breakpoint set --name IOConnectCallMethod --condition '$x1 == 0x1a'
+continue
+register read x0 x1 x2 x3 x4 x5
+thread backtrace
+script exec(open("misc/lldb_dump_iosclear.py").read())
+continue

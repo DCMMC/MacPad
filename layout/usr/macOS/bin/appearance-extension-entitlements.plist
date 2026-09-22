@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Ventura Appearance.appex native capabilities. -->
+    <key>com.apple.private.launchservices.changedefaulthandlers</key>
+    <array>
+        <string>http</string>
+        <string>https</string>
+        <string>public.html</string>
+    </array>
+    <key>com.apple.private.tcc.allow</key>
+    <array>
+        <string>kTCCServiceScreenCapture</string>
+    </array>
+
+    <!-- Minimal MacWS execution contract required before libmachook loads. -->
+    <key>com.apple.private.allow-explicit-graphics-priority</key>
+    <true/>
+    <key>com.apple.private.amfi.can-execute-cdhash</key>
+    <true/>
+    <key>com.apple.private.graphics-restart-no-kill</key>
+    <true/>
+    <key>com.apple.private.security.no-container</key>
+    <true/>
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
+    <!--
+      ExtensionKit installs the settings-extensions sandbox profile after
+      code-signing admission, so no-sandbox alone does not grant Mach lookup
+      access. libmachook deliberately isolates the Ventura services below
+      from identically named iPadOS services. Keep this exception scoped to
+      the Appearance extension and to those exact production endpoints.
+
+      Runtime evidence: appearance-boundary-oslog.txt recorded the kernel
+      denying com.apple.macosbooter.lsd.modifydb, followed by
+      _LSPluginFindWithPlatformInfo returning -10814 and
+      EXRunningExtension.m:149 rejecting the nil record.
+    -->
+    <key>com.apple.security.exception.mach-lookup.global-name</key>
+    <array>
+        <string>com.apple.macosbooter.systemstatus</string>
+        <string>com.apple.macosbooter.systemstatus.publisher</string>
+        <string>com.apple.macosbooter.systemstatus.activityattribution</string>
+        <string>com.apple.macosbooter.coreservices.launchservicesd</string>
+        <string>com.apple.macosbooter.cfprefsd.daemon</string>
+        <string>com.apple.macosbooter.cfprefsd.agent</string>
+        <string>com.apple.macosbooter.iconservices</string>
+        <string>com.apple.macosbooter.iconservices.store</string>
+        <string>com.apple.macosbooter.lsd.advertisingidentifiers</string>
+        <string>com.apple.macosbooter.lsd.diagnostics</string>
+        <string>com.apple.macosbooter.lsd.dissemination</string>
+        <string>com.apple.macosbooter.lsd.encryption</string>
+        <string>com.apple.macosbooter.lsd.extensions</string>
+        <string>com.apple.macosbooter.lsd.mapdb</string>
+        <string>com.apple.macosbooter.lsd.modifydb</string>
+        <string>com.apple.macosbooter.lsd.open</string>
+        <string>com.apple.macosbooter.lsd.openurl</string>
+        <string>com.apple.macosbooter.lsd.personaobserver</string>
+        <string>com.apple.macosbooter.lsd.plugin</string>
+        <string>com.apple.macosbooter.lsd.trustedsignatures</string>
+        <string>com.apple.macosbooter.security.translocation</string>
+        <string>com.apple.macosbooter.ViewBridgeAuxiliary</string>
+        <string>com.apple.macosbooter.extensionkitservice</string>
+        <string>com.apple.macosbooter.hiservices-xpcservice</string>
+        <string>com.apple.macosbooter.CARenderServer</string>
+        <string>com.apple.windowserver</string>
+        <string>com.apple.windowserver.active</string>
+        <string>com.apple.windowserver.watchdog</string>
+    </array>
+    <!--
+      RunningBoard's extension job installs the iOS container profile even
+      though the launch carrier itself is unsandboxed.  The kernel evaluates
+      file rules against the host vnode path after the carrier chroots, so the
+      real macOS image and dyld appear below this one exact mount prefix.
+    -->
+    <key>com.apple.security.exception.files.absolute-path.read-write</key>
+    <string>/private/var/mnt/rootfs/</string>
+    <key>get-task-allow</key>
+    <true/>
+    <key>platform-application</key>
+    <true/>
+</dict>
+</plist>

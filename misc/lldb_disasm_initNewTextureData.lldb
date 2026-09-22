@@ -1,0 +1,12 @@
+settings set target.process.stop-on-sharedlibrary-events false
+breakpoint set --address 0x2262f1510
+continue
+register read x25 x2 sp pc
+expression -- unsigned long $macws_args = $sp + 0x30
+memory read --format x --size 8 --count 12 $macws_args
+watchpoint set expression -w write -s 8 -- `$macws_args + 0x50`
+continue
+register read x0 x1 x2 x8 x9 x10 x20 x21 x22 x23 x24 x25 sp pc
+thread backtrace
+memory read --format x --size 8 --count 12 $macws_args
+disassemble --start-address `$pc - 0x300` --count 520

@@ -1,0 +1,17 @@
+settings set target.process.stop-on-sharedlibrary-events false
+command script import misc/lldb_watch_native_kcmd_field.py
+command script import misc/lldb_dump_macos_agx_render.py
+script lldb_dump_macos_agx_render.break_render_encoder(lldb.debugger)
+continue
+# Two macOS-only 0x10 windows precede original +0x600, so this is normalized
+# record+0x5e0.  The exact native record contains zero; macOS contains byte
+# value 1 at +0x5e3 (u32 0x01000000).
+script lldb_watch_native_kcmd_field.capture_base(lldb.debugger, 0x250)
+script lldb_watch_native_kcmd_field.arm(lldb.debugger, 0x600, 0x01000000)
+continue
+watchpoint list
+register read x0 x1 x2 x3 x8 x9 x10 x11 x12 x13 x19 x20 x21 x22 x23 x24 x25 x26 x27 x28 x29 x30 pc
+thread backtrace -c 50
+disassemble --start-address '$pc-0x60' --count 112
+detach
+quit

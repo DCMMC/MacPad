@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <!-- coreaudiod validates its launchd service identity at startup. -->
+    <string>com.apple.audio.coreaudiod</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/jb/usr/macOS/bin/launchdchrootexec</string>
+        <string>0</string>
+        <string>0</string>
+        <string>/var/mnt/rootfs</string>
+        <string>/usr/sbin/coreaudiod</string>
+    </array>
+    <key>MachServices</key>
+    <dict>
+        <key>com.apple.audio.audiohald</key>
+        <dict>
+            <key>ResetAtClose</key>
+            <true/>
+        </dict>
+        <key>com.apple.audio.coreaudiod</key>
+        <dict>
+            <key>ResetAtClose</key>
+            <true/>
+        </dict>
+        <key>com.apple.audio.driver-registrar</key>
+        <true/>
+        <key>com.apple.audio.session-manager</key>
+        <true/>
+    </dict>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>StandardOutPath</key>
+    <string>/var/jb/var/mobile/macws-coreaudiod.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/jb/var/mobile/macws-coreaudiod.log</string>
+</dict>
+</plist>

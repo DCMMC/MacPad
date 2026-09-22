@@ -1,0 +1,7 @@
+# iOS 16.3.1 current-boot IMP, runtime-enumerated from the actual
+# AGXG13GFamilyCommandBuffer class.  Shared-cache addresses change after boot;
+# refresh /var/mobile/iosclear-agx-runtime.log before reusing this script.
+image lookup --address 0x221a0c474
+disassemble --start-address 0x221a0c474 --count 160
+detach
+quit

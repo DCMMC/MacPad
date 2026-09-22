@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Preserve the Ventura service's native capabilities. -->
+    <key>com.apple.private.coreservices.canmaplsdatabase</key>
+    <true/>
+    <key>com.apple.private.extensionkit.host.any-extension</key>
+    <true/>
+    <key>com.apple.private.tcc.manager.access.read</key>
+    <array>
+        <string>kTCCServiceAll</string>
+    </array>
+    <key>com.apple.private.xpc.domain-extension.proxy</key>
+    <true/>
+    <key>com.apple.private.xpc.persona-manager</key>
+    <true/>
+    <key>com.apple.runningboard.launch_extensions</key>
+    <true/>
+    <key>com.apple.runningboard.launchprocess</key>
+    <true/>
+    <key>com.apple.runningboard.process-state</key>
+    <true/>
+    <key>com.apple.runningboard.statecapture</key>
+    <true/>
+    <key>com.apple.security.exception.files.absolute-path.read-write</key>
+    <string>/private/var/folders/</string>
+    <key>com.apple.security.exception.shared-preference.read-write</key>
+    <string>com.apple.extensionkit</string>
+
+    <!-- Chroot/iPadOS launch contract used by other root MacWS daemons. -->
+    <key>com.apple.private.security.no-container</key>
+    <true/>
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
+    <key>com.apple.private.amfi.can-execute-cdhash</key>
+    <true/>
+    <key>get-task-allow</key>
+    <true/>
+    <key>platform-application</key>
+    <true/>
+</dict>
+</plist>

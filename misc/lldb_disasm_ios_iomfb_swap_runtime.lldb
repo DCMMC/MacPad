@@ -1,0 +1,19 @@
+# Read-only one-shot disassembly from an iOS-native process that already has
+# the iOS 16.3.1 IOMobileFramebuffer image loaded.  Use with lldb_remote.sh and
+# a short-lived backboardd attach; detach immediately after collecting bytes.
+image list -o -f IOMobileFramebuffer
+image lookup -n IOMobileFramebufferSwapBegin
+image lookup -n IOMobileFramebufferSwapEnd
+image lookup -n IOMobileFramebufferSwapWait
+image lookup -n IOMobileFramebufferSwapCancel
+image lookup -rn 'kern_Swap(Begin|End|Wait|Cancel)'
+disassemble -n IOMobileFramebufferSwapBegin -b
+disassemble -n IOMobileFramebufferSwapEnd -b
+disassemble -n IOMobileFramebufferSwapWait -b
+disassemble -n IOMobileFramebufferSwapCancel -b
+disassemble -n kern_SwapBegin -b
+disassemble -n kern_SwapEnd -b
+disassemble -n kern_SwapWait -b
+disassemble -n kern_SwapCancel -b
+process detach
+quit

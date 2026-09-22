@@ -1,0 +1,12 @@
+TARGET := iphone:clang:latest:14.0
+ARCHS = arm64
+
+include $(THEOS)/makefiles/common.mk
+
+TOOL_NAME = IOSAGXTextureREProbe
+IOSAGXTextureREProbe_FILES = ios_agx_texture_re_probe.m
+IOSAGXTextureREProbe_CFLAGS = -fobjc-arc
+IOSAGXTextureREProbe_CODESIGN_FLAGS = -S../entitlements.plist
+IOSAGXTextureREProbe_FRAMEWORKS = Foundation Metal CoreVideo IOSurface
+
+include $(THEOS_MAKE_PATH)/tool.mk

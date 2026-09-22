@@ -1,0 +1,26 @@
+settings set target.memory-module-load-level minimal
+settings set target.process.stop-on-sharedlibrary-events true
+command script import misc/lldb_trace_pf550_updatebind.py
+process handle -s false -n false -p false SIGSTOP
+script lldb_trace_pf550_updatebind.wait_for_agx_and_install_five(lldb.debugger)
+settings set target.process.stop-on-sharedlibrary-events false
+process handle -s false -n false -p true SIGSEGV SIGBUS
+script lldb_trace_pf550_updatebind.continue_until_target(lldb.debugger)
+register read x0 x2 x3 x4 x5 x6 x19 x20 x21 x22 x23 x24 lr pc
+script lldb_trace_pf550_updatebind.arm_helper_return(lldb.debugger)
+continue
+register read x0 x19 x20 x21 x22 x23 x24 x25 lr pc
+script lldb_trace_pf550_updatebind.dump_helper_return(lldb.debugger)
+script lldb_trace_pf550_updatebind.arm_after_update(lldb.debugger)
+continue
+register read x0 x19 x20 x21 x22 x23 x24 x25 lr pc
+script lldb_trace_pf550_updatebind.capture_metadata(lldb.debugger, "after-address-stores")
+script lldb_trace_pf550_updatebind.arm_after_metadata_virtual(lldb.debugger)
+continue
+register read x0 x19 x20 x21 x22 x23 x24 x25 lr pc
+script lldb_trace_pf550_updatebind.dump_saved_metadata(lldb.debugger, "after-metadata-virtual")
+script lldb_trace_pf550_updatebind.arm_caller_return(lldb.debugger)
+continue
+register read x0 x19 x20 x21 x22 x23 x24 x25 lr pc
+script lldb_trace_pf550_updatebind.dump_saved_metadata(lldb.debugger, "caller-return-metadata")
+script lldb_trace_pf550_updatebind.dump_target_impl(lldb.debugger, "caller-return-parent")

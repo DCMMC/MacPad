@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.macwsguide.viewbridge</string>
+    <key>ProgramArguments</key>
+    <array>
+        <!--
+          This freestanding first image performs chroot+exec before libSystem
+          consumes launchd's service port.  launchd starts it as root, so the
+          real Ventura ViewBridge can join the root WindowServer session
+          without making the process setugid (which xpc_main rejects).
+        -->
+        <string>/var/jb/usr/macOS/Frameworks/ViewBridge.framework/Versions/A/XPCServices/ViewBridgeAuxiliary.xpc/ViewBridgeAuxiliary</string>
+    </array>
+    <key>MachServices</key>
+    <dict>
+        <key>com.apple.macosbooter.ViewBridgeAuxiliary</key>
+        <true/>
+    </dict>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CA_VSYNC_OFF</key>
+        <string>1</string>
+        <key>MACWS_AGX_NATIVE</key>
+        <string>1</string>
+        <key>MACWS_AGX_REGISTER_CLASSES</key>
+        <string>1</string>
+    </dict>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/var/jb/var/mobile/viewbridge.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/jb/var/mobile/viewbridge.log</string>
+</dict>
+</plist>

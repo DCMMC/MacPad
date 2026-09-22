@@ -1,0 +1,15 @@
+# Stop before the iOS AGX command-buffer producer consumes the render-pass
+# descriptor, recover the freshly allocated KCMD base, then watch stable
+# semantic fields rather than guessing from final bytes.
+breakpoint set --address 0x221a0e044
+continue
+register read x0 x1 x2 x29 x30 pc
+thread backtrace -c 24
+script exec(open("misc/lldb_arm_native_kcmd_field_watch.py").read())
+continue
+watchpoint list
+register read x0 x1 x2 x3 x8 x9 x10 x19 x20 x21 x22 x29 x30 pc
+thread backtrace -c 40
+disassemble --start-address '$pc-0x40' --count 72
+detach
+quit

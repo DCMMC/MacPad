@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Disposable launch job for the current Chrome 150 stable arm64 build.
+      The profile is intentionally separate from a user's ordinary Chrome
+      profile and from Electron's GPU cache.
+    -->
+    <key>Label</key>
+    <string>UIKitApplication:com.macwsguide.chrome150</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/jb/usr/macOS/bin/launchdchrootexec</string>
+        <string>0</string>
+        <string>0</string>
+        <string>/var/mnt/rootfs</string>
+        <string>/Applications/Google Chrome.app/Contents/MacOS/Google Chrome</string>
+        <string>--user-data-dir=/tmp/macws-chrome150-profile-pa-opt-v6-opt1g</string>
+        <string>--no-first-run</string>
+        <string>--no-default-browser-check</string>
+        <string>--disable-background-networking</string>
+        <string>--disable-component-update</string>
+        <string>--disable-updates</string>
+        <string>--no-sandbox</string>
+        <string>--disable-gpu-sandbox</string>
+        <!-- Remote debugging belongs to explicit diagnostic launches, never
+             this ordinary browser profile. -->
+        <string>--use-angle=metal</string>
+        <string>--ignore-gpu-blocklist</string>
+        <string>--disable-features=SkiaGraphite</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CA_VSYNC_OFF</key>
+        <string>1</string>
+        <key>CA_DISABLE_SWAP_ICC</key>
+        <string>1</string>
+        <key>MACWS_AGX_NATIVE</key>
+        <string>1</string>
+        <key>MACWS_AGX_REGISTER_CLASSES</key>
+        <string>1</string>
+        <key>MACWS_JIT_MPROTECT_COMPAT</key>
+        <string>1</string>
+        <key>MACWS_AMFI_IMMOVABLE_TASK_PORT_COMPAT</key>
+        <string>1</string>
+        <key>MACWS_MACOS_SYSTEM_POLICY_COMPAT</key>
+        <string>1</string>
+        <key>MACWS_CHROMIUM_COMPOSITE_OVERLAYS</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <!-- This launchd job hosts a foreground AppKit browser.  Match the
+         interactive process class used by a normal GUI launch instead of
+         inheriting launchd's adaptive daemon scheduling policy.  The exact
+         Chrome 150 FishTank A/B must still validate the resulting cadence. -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>StandardOutPath</key>
+    <string>/var/jb/var/mobile/chrome150.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/jb/var/mobile/chrome150.log</string>
+</dict>
+</plist>

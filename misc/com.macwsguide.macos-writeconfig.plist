@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <!-- XPC bundles require launchd's job label/XPC_SERVICE_NAME to equal the
+         bundle identifier.  iPadOS 16 does not publish this macOS service. -->
+    <string>com.apple.systemadministration.writeconfig</string>
+    <key>POSIXSpawnType</key>
+    <string>Adaptive</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/jb/usr/macOS/PrivateFrameworks/SystemAdministration.framework/XPCServices/WriteConfigProxy.xpc/WriteConfigProxy</string>
+    </array>
+    <key>MachServices</key>
+    <dict>
+        <key>com.apple.systemadministration.writeconfig</key>
+        <true/>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>/var/jb/var/mobile/macos-writeconfig.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/jb/var/mobile/macos-writeconfig.log</string>
+</dict>
+</plist>

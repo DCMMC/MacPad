@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.macwsguide.rootdir-ios-probe</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/jb/usr/bin/sh</string>
+        <string>-c</string>
+        <string>id; pwd; echo rootdir-ios-ok</string>
+    </array>
+    <key>RootDirectory</key>
+    <string>/var/mnt/rootfs</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>UserName</key>
+    <string>root</string>
+    <key>StandardOutPath</key>
+    <string>/tmp/macws-rootdir-ios-probe.out</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/macws-rootdir-ios-probe.err</string>
+</dict>
+</plist>

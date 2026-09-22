@@ -1,0 +1,4 @@
+settings set target.process.stop-on-sharedlibrary-events false
+command script import misc/lldb_trace_iosclear_iogpu.py
+script lldb_trace_iosclear_iogpu.install_submit_only(lldb.debugger)
+continue

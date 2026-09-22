@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Launch job for the UUID-locked arm64 Visual Studio Code build. -->
+    <key>Label</key>
+    <string>UIKitApplication:com.macwsguide.vscode</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/jb/usr/macOS/bin/launchdchrootexec</string>
+        <string>0</string>
+        <string>0</string>
+        <string>/var/mnt/rootfs</string>
+        <string>/Applications/Visual Studio Code.app/Contents/MacOS/Electron</string>
+		<!-- Keep this native-AGX profile isolated from the user's normal VS Code
+		     profile.  The packaged settings disable the stale AgentHost generation
+		     that runtime tracing tied to Chrome_IOThread's full-queue MOJO retry;
+		     graphics caches and restored webviews remain disposable. -->
+		<string>--user-data-dir=/tmp/macws-vscode-profile-agx-native-production1</string>
+        <string>--extensions-dir=/tmp/macws-vscode-extensions</string>
+        <string>--disable-updates</string>
+        <!-- launchdchrootexec already supplies the complete chroot HOME, USER,
+             TMPDIR, SHELL and executable environment.  Use VS Code's supported
+             switch to skip the main service's redundant login-shell probe.
+             VS Code 1.130's ptyHost deliberately does not inherit these CLI
+             arguments; libmachook implements that service's exact
+             VSCODE_RESOLVING_ENVIRONMENT token+JSON printer protocol without
+             starting a second full Chromium instance. -->
+        <string>--force-disable-user-env</string>
+        <string>--no-sandbox</string>
+        <string>--disable-gpu-sandbox</string>
+        <!-- Production web links use the extension's private Unix socket.
+             CDP is only for explicit, separately launched diagnostic runs. -->
+        <string>--use-angle=metal</string>
+        <string>--ignore-gpu-blocklist</string>
+        <!-- Graphite is independent of WebGL/ANGLE. Keep it off because its
+             generated MSL is not accepted by the Ventura/iOS 16 Metal stack;
+             ANGLE's tracked macabi library remains the WebGL backend. -->
+        <!-- Runtime-confirmed in vscode.log: the AVSampleBufferDisplayLayer
+             overlay retries CVPixelBufferCreateWithIOSurface once per video
+             frame and receives kCVReturnInvalidArgument (-6661), which is the
+             HDR black-window trigger. Electron 42's linked Chromium image
+             contains the current BASE_FEATURE name `avfoundation-overlays`;
+             retain the legacy dedicated switch too because older supported
+             Electron builds route the same policy through that switch. -->
+        <string>--disable-features=SkiaGraphite,avfoundation-overlays</string>
+        <string>--disable-avfoundation-overlays</string>
+        <!-- Keep Chromium's production JIT scheduling.  The W^X adapter now
+             reports successful RX transitions without late retries, while a
+             runtime sample with the old no-concurrent option group found the
+             Electron main thread permanently waiting in
+             OptimizingCompileTaskExecutor::WaitUntilCompilationJobsDoneForIsolate. -->
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Chromium 148's ScreenMac maps EDR>1 directly to HDR10/RGBA16F,
+             but MacWS publishes an 8-bit BGRA desktop IOSurface. Advertise
+             the real scanout boundary so streaming sites choose an SDR track
+             and Chromium does not submit an unrepresentable HDR plane. -->
+        <key>MACWS_SDR_SCANOUT</key>
+        <string>1</string>
+        <key>CA_VSYNC_OFF</key>
+        <string>1</string>
+        <key>CA_DISABLE_SWAP_ICC</key>
+        <string>1</string>
+        <key>MACWS_AGX_NATIVE</key>
+        <string>1</string>
+        <key>MACWS_AGX_REGISTER_CLASSES</key>
+        <string>1</string>
+        <key>MACWS_JIT_MPROTECT_COMPAT</key>
+        <string>1</string>
+        <!-- iOS 16 cannot provide macOS MAP_JIT/APRR.  Keep the V8 CodeRange
+             RX and turn only the 16-KiB page hit by a scoped writer's data
+             SIGBUS into RW; the last writer restores those pages RX.  This
+             replaces the legacy 256-MiB whole-range flip, which runtime logs
+             measured at 23k flips / 6.7k instruction-fetch waits in 30s. -->
+        <key>MACWS_JIT_FAULT_WRITE_COMPAT</key>
+        <string>1</string>
+        <key>MACWS_AMFI_IMMOVABLE_TASK_PORT_COMPAT</key>
+        <string>1</string>
+        <key>MACWS_MACOS_SYSTEM_POLICY_COMPAT</key>
+        <string>1</string>
+        <!-- NSOpenPanel/FinderKit is a CoreServices filesystem-catalog
+             consumer.  Keep the chroot root as its logical volume root so
+             FileCache cannot construct a host-mount parent cycle.  The
+             underlying statfs/fsgetpath adapters are dyld interposes and are
+             therefore safe across Electron's early fork. -->
+        <key>MACWS_APP_MOUNT_COMPAT</key>
+        <string>1</string>
+        <key>MACWS_CHROMIUM_COMPOSITE_OVERLAYS</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <!-- VS Code is a foreground GUI workload even though the chroot bridge
+         must submit it as a launchd job.  Without this declaration launchd
+         assigns the job the adaptive daemon spawn type; the controlled
+         CVDisplayLink witness then receives callbacks tens of milliseconds
+         after their output timestamps while an interactive-shell control on
+         the same display remains at 119 Hz. -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>StandardOutPath</key>
+    <string>/var/jb/var/mobile/vscode.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/jb/var/mobile/vscode.log</string>
+</dict>
+</plist>

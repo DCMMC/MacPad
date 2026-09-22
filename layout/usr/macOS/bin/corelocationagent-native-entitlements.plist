@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.CoreLocation.PrivateMode</key>
+	<true/>
+	<key>com.apple.locationd.authorizeapplications</key>
+	<true/>
+	<key>com.apple.locationd.effective_bundle</key>
+	<true/>
+	<key>com.apple.locationd.integritycheck</key>
+	<true/>
+	<key>com.apple.locationd.mock_testing</key>
+	<true/>
+	<key>com.apple.locationd.simulation</key>
+	<true/>
+	<key>com.apple.locationd.spectator</key>
+	<true/>
+	<key>com.apple.locationd.status</key>
+	<true/>
+	<key>com.apple.private.AuthorizationServices</key>
+	<array>
+		<string>system.preferences.nvram</string>
+	</array>
+	<key>com.apple.private.admin.writeconfig</key>
+	<true/>
+	<key>com.apple.private.notificationcenterui.tcc</key>
+	<true/>
+	<key>com.apple.wifi.events.private</key>
+	<true/>
+	<key>com.apple.wifi.priority.id</key>
+	<string>core_location</string>
+	<key>com.apple.wifi.priority.internal</key>
+	<true/>
+	<key>com.apple.wifi.scan</key>
+	<true/>
+	<key>com.apple.wifi.set_power</key>
+	<true/>
+</dict>
+</plist>

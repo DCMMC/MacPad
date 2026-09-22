@@ -1,0 +1,5 @@
+settings set target.process.stop-on-sharedlibrary-events false
+image lookup -n MacWSRunIOSClearReference
+image list -o -f
+detach
+quit

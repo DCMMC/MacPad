@@ -1,0 +1,9 @@
+# Runtime-confirmed for WindowServer PID 43394 by the selector-0x107
+# IOConnectCallAsyncScalarMethod registration witness:
+#   AGXMetal13_3 shared-cache slide = 0x168a0000
+#   ref[1] runtime                  = 0x1fbffda08
+#   ref[1] static                   = 0x1e575da08
+# The runtime address changes with the process.  Obtain the new ref[1] from
+# `AGXIOC ASYNC-REFERENCE` and update both commands before reusing this file.
+image lookup --address 0x1fbffda08
+disassemble --start-address 0x1fbffda08 --count 320

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Required by the chroot launch contract.  Omitting no-sandbox/no-container
+	     is runtime-confirmed to fail before main with System Policy process-exec. -->
+	<key>platform-application</key>
+	<true/>
+	<!-- Keep library validation compatible with launchdchrootexec's required
+	     DYLD_INSERT_LIBRARIES contract.  Without this key, libmachook is absent
+	     from the crash image list and libSystem traps in os_variant before main. -->
+	<key>get-task-allow</key>
+	<true/>
+	<key>com.apple.private.security.no-container</key>
+	<true/>
+	<key>com.apple.private.security.no-sandbox</key>
+	<true/>
+
+	<!-- Stock-derived rights used by the official Ventura locationd internal
+	     and simulation protocols.  A caller with only locationd.activity gets
+	     internalservice.errorDomain Code=2 from setLocationServicesEnabled:. -->
+	<key>com.apple.locationd.activity</key>
+	<true/>
+	<key>com.apple.locationd.authorizeapplications</key>
+	<true/>
+	<key>com.apple.locationd.effective_bundle</key>
+	<true/>
+	<key>com.apple.locationd.integritycheck</key>
+	<true/>
+	<key>com.apple.locationd.mock_testing</key>
+	<true/>
+	<key>com.apple.locationd.simulation</key>
+	<true/>
+	<key>com.apple.locationd.spectator</key>
+	<true/>
+	<key>com.apple.locationd.status</key>
+	<true/>
+	<key>com.apple.private.admin.writeconfig</key>
+	<true/>
+	<key>com.apple.private.security.storage.locationd</key>
+	<true/>
+	<key>com.apple.private.xpc.launchd.per-user-lookup</key>
+	<true/>
+</dict>
+</plist>

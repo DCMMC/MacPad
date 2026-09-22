@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>WebContentProxy</string>
+<key>CFBundleIdentifier</key><string>com.apple.macosbooter.WebKit.WebContent</string>
+<key>CFBundlePackageType</key><string>XPC!</string>
+<key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+<key>MinimumOSVersion</key><string>14.0</string>
+<key>LSUIElement</key><true/>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+<key>XPCService</key><dict>
+<key>JoinExistingSession</key><true/>
+<key>RunLoopType</key><string>NSRunLoop</string>
+<key>ServiceType</key><string>Application</string>
+<key>_MultipleInstances</key><true/>
+<key>_HighBitsASLR</key><true/>
+<key>_ProcessType</key><string>App</string>
+<key>_AdditionalProperties</key><dict><key>RunningBoard</key><dict>
+<key>Managed</key><true/><key>Reported</key><true/>
+</dict></dict>
+</dict></dict></plist>

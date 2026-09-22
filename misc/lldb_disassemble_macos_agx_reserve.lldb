@@ -1,0 +1,7 @@
+# macOS 13.4 current-boot IMP, runtime-enumerated from the actual chroot
+# AGXG13GFamilyCommandBuffer class.  Shared-cache addresses change after boot;
+# refresh /tmp/macws_agx_runtime_methods.log before reusing this script.
+image lookup --address 0x20ab0b788
+disassemble --start-address 0x20ab0b788 --count 160
+detach
+quit

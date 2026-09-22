@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      System Settings carries a system-service launch constraint.  It must be
+      born as a real launchd job: starting launchdchrootexec from an SSH shell
+      and letting it become orphaned is not equivalent, and AMFI rejects the
+      requested system-service launch type before dyld enters the app.
+    -->
+    <key>Label</key>
+    <string>com.macwsguide.systemsettings</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/jb/usr/macOS/bin/launchdchrootexec</string>
+        <!--
+          ExtensionKit extension jobs inherit their host's launchd domain and
+          audit identity.  iPadOS permits normal extension jobs under the
+          mobile user; a root-hosted extension is rejected by launchd before
+          its proxy reaches main.  launchdchrootexec enters the chroot first,
+          then drops the actual System Settings process to mobile.
+        -->
+        <string>501</string>
+        <string>501</string>
+        <string>/var/mnt/rootfs</string>
+        <string>/System/Applications/System Settings.app/Contents/MacOS/System Settings</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CA_VSYNC_OFF</key>
+        <string>1</string>
+        <key>MACWS_AGX_NATIVE</key>
+        <string>1</string>
+        <key>MACWS_AGX_REGISTER_CLASSES</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>StandardOutPath</key>
+    <string>/var/jb/var/mobile/systemsettings.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/jb/var/mobile/systemsettings.log</string>
+</dict>
+</plist>

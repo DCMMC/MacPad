@@ -1,0 +1,28 @@
+settings set target.process.stop-on-sharedlibrary-events false
+command script import misc/lldb_watch_native_kcmd_field.py
+command script import misc/lldb_dump_macos_agx_render.py
+# Resolve the process-specific dyld shared-cache slide. Absolute addresses from
+# an earlier WindowServer process are invalid even without an iPad reboot.
+script lldb_dump_macos_agx_render.break_render_encoder(lldb.debugger)
+continue
+# RE-confirmed macOS IOGPUMetalCommandBuffer storage ivar is self+0x250.
+script lldb_watch_native_kcmd_field.capture_base(lldb.debugger, 0x250)
+# macOS original +0x3b0 maps to normalized iOS-layout +0x3a0 after removal
+# of the first 0x10-byte ABI insertion. The captured bad producer value is 8;
+# condition the watchpoint so the record's initial zero-fill does not stop us.
+script lldb_watch_native_kcmd_field.arm(lldb.debugger, 0x3b0, 8)
+continue
+watchpoint list
+register read x0 x1 x2 x3 x8 x9 x10 x19 x20 x21 x22 x23 x24 x25 x26 x27 x28 x29 x30 pc
+thread backtrace -c 50
+# Capture the producer objects on both sides of the cross-version register
+# mapping.  The native iOS writer reads its replacement value from the object
+# that also owns +0xc28; in this macOS function that role is held by x21.
+memory read --force --size 8 --format x --count 40 '$x20'
+memory read --force --size 8 --format x --count 40 '$x21'
+memory read --force --size 8 --format x --count 12 '$x21+0xc00'
+memory read --force --size 4 --format x --count 48 '$x24+0xf80'
+memory read --force --size 4 --format x --count 24 '$sp'
+disassemble --start-address '$pc-0x50' --count 96
+detach
+quit

@@ -1,0 +1,17 @@
+# Read-only, bounded FrameInfo callback/queue trace for the exact macOS 13.4
+# QuartzCore UUID CF853BBD-01B6-3F46-ADA1-EC70FD2DC9DC.
+settings set target.memory-module-load-level minimal
+settings set target.preload-symbols false
+settings set target.process.stop-on-sharedlibrary-events true
+process handle -s false -n false -p false SIGSTOP
+command script import misc/lldb_trace_iomfb_frame_info.py
+script import lldb_trace_iomfb_frame_info as macws_iomfb_frame_info
+script macws_iomfb_frame_info.wait_for_quartzcore_and_install(lldb.debugger, 16, 24)
+settings set target.process.stop-on-sharedlibrary-events false
+process continue
+script macws_iomfb_frame_info.dump_summary()
+thread backtrace
+# The page allocator can produce hundreds of 15-MiB IOSurfaces per second.
+# Kill at the bounded breakpoint; detaching would resume the known storm before
+# the outer cleanup script can reconnect over SSH.
+process kill

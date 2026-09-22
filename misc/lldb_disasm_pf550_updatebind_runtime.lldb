@@ -1,0 +1,14 @@
+settings set target.memory-module-load-level minimal
+settings set target.preload-symbols false
+settings set interpreter.stop-command-source-on-error false
+image list -o -f AGXMetal13_3
+# Current-boot runtime address: static 0x1e57716b4 + shared-cache slide
+# 0x239d0000, with the slide runtime-confirmed by caller
+# 0x20942afc8 -> static 0x1e5a5afc8 in the preceding bounded trace.
+disassemble --start-address 0x2091416b4 --count 420
+# texBaseAddressesUpdated virtual target static 0x1e576b8d4, captured by
+# lldb_disasm_pf550_parent_virtual.lldb in this boot.  Continue from its
+# conditional extended-word branch through the descriptor stores.
+disassemble --start-address 0x20913bf20 --count 300
+detach
+quit

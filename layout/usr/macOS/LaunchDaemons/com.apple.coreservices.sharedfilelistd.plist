@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.apple.coreservices.sharedfilelistd</string>
+	<key>MachServices</key>
+	<dict>
+		<key>com.apple.coreservices.sharedfilelistd.xpc</key>
+		<true/>
+	</dict>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/var/jb/usr/macOS/bin/launchdchrootexec</string>
+		<string>501</string>
+		<string>501</string>
+		<string>/var/mnt/rootfs</string>
+		<string>/System/Library/CoreServices/sharedfilelistd</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/var/jb/var/mobile/sharedfilelistd.out</string>
+	<key>StandardErrorPath</key>
+	<string>/var/jb/var/mobile/sharedfilelistd.err</string>
+</dict>
+</plist>

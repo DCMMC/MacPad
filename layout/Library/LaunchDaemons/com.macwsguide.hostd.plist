@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.macwsguide.hostd</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/jb/usr/macOS/bin/macwshostd</string>
+    </array>
+    <key>MachServices</key>
+    <dict>
+        <key>com.macwsguide.host.control</key>
+        <true/>
+    </dict>
+    <!--
+      macwshostd is the single production launcher for ordinary AppKit apps.
+      Every GUI client needs the virtual display timing contract. Native AGX
+      is intentionally added per target by macwshostd: Terminal/Finder are
+      WindowServer clients, while GlassDemo owns a Metal device itself.
+    -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CA_DISABLE_SWAP_ICC</key>
+        <string>1</string>
+        <key>CA_VSYNC_OFF</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>3</integer>
+    <key>StandardOutPath</key>
+    <string>/var/mobile/Library/Logs/MacWSHostd.launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/mobile/Library/Logs/MacWSHostd.launchd.log</string>
+</dict>
+</plist>

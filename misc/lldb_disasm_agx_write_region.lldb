@@ -1,0 +1,4 @@
+settings set target.process.stop-on-sharedlibrary-events false
+image list -o -f
+image lookup -rn writeRegion
+disassemble -n _ZN3AGX7TextureIL22AGXTextureMemoryLayout3ENS_3G138EncodersENS2_7ClassesEE11writeRegionEjjjjjjjjjPvmm

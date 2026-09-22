@@ -1,0 +1,11 @@
+# Addresses are runtime-confirmed by the Code=3 completion breakpoint for
+# WindowServer PID 43831.  Keep the ranges broad enough to include each PAC
+# prologue; refresh them after the shared-cache slide changes.
+image lookup --address 0x1a01093c8
+disassemble --start-address 0x1a0109100 --count 240
+image lookup --address 0x1b39e3fa4
+disassemble --start-address 0x1b39e3d00 --count 240
+image lookup --address 0x1b39ec190
+disassemble --start-address 0x1b39ebf80 --count 260
+image lookup --address 0x1b39ec29c
+disassemble --start-address 0x1b39ec25c --count 160

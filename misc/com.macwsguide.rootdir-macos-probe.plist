@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.macwsguide.rootdir-macos-probe</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>id; pwd; echo rootdir-macos-ok</string>
+    </array>
+    <key>RootDirectory</key>
+    <string>/var/mnt/rootfs</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>UserName</key>
+    <string>root</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DYLD_INSERT_LIBRARIES</key>
+        <string>/usr/local/lib/libmachook.dylib</string>
+        <key>HOME</key>
+        <string>/Users/root</string>
+        <key>USER</key>
+        <string>root</string>
+        <key>TMPDIR</key>
+        <string>/tmp</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/macws-rootdir-macos-probe.out</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/macws-rootdir-macos-probe.err</string>
+</dict>
+</plist>

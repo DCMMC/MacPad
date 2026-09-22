@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>English</string>
+    <key>CFBundleExecutable</key>
+    <string>OpenAndSavePanelProxy</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.apple.appkit.xpc.openAndSavePanelService</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Open and Save Panel Chroot Proxy</string>
+    <key>CFBundlePackageType</key>
+    <string>XPC!</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array><string>iPhoneOS</string></array>
+    <key>MinimumOSVersion</key>
+    <string>14.0</string>
+    <key>LSBackgroundOnly</key>
+    <true/>
+    <key>NSMainNibFile</key>
+    <string>main</string>
+    <key>NSPrincipalClass</key>
+    <string>NSViewServiceApplication</string>
+    <key>XPCService</key>
+    <dict>
+        <key>JoinExistingSession</key>
+        <true/>
+        <key>RunLoopType</key>
+        <string>_NSApplicationMain</string>
+        <key>ServiceType</key>
+        <string>Application</string>
+    </dict>
+</dict>
+</plist>

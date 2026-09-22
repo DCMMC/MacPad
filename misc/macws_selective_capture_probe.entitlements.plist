@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Explicit screen-capture helper only, not the shared application
+         signing profile. All native permission/readback checks stay intact.
+         Diagnostic entitlement test; not proof of functioning capture. -->
+    <key>com.apple.private.tcc.allow</key>
+    <array><string>kTCCServiceScreenCapture</string></array>
+    <key>com.apple.private.allow-explicit-graphics-priority</key><true/>
+    <key>com.apple.private.graphics-restart-no-kill</key><true/>
+    <key>com.apple.private.amfi.can-execute-cdhash</key><true/>
+    <key>com.apple.private.security.no-container</key><true/>
+    <key>com.apple.private.security.no-sandbox</key><true/>
+    <key>get-task-allow</key><true/>
+    <key>platform-application</key><true/>
+</dict>
+</plist>

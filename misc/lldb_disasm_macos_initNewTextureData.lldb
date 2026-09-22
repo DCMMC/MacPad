@@ -1,0 +1,5 @@
+settings set target.process.stop-on-sharedlibrary-events false
+settings set interpreter.stop-command-source-on-error false
+image list AGXMetal13_3
+expression -l c -- (void *)({ extern void *objc_getClass(const char *); extern void *sel_registerName(const char *); extern void *class_getMethodImplementation(void *, void *); class_getMethodImplementation(objc_getClass("AGXG13GFamilyDevice"), sel_registerName("initNewTextureData:")); })
+disassemble --start-address $0 --count 520

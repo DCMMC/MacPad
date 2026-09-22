@@ -1,0 +1,14 @@
+# Minimal OpenSSL 1.1 application configuration for self-contained macOS apps.
+#
+# MacWS does not install OpenSSL into /usr/local, but applications built with
+# OpenSSL's default prefix still load /usr/local/ssl/openssl.cnf during library
+# initialisation.  An absent file leaves ENOENT on OpenSSL's thread-local error
+# queue and can make a later SSL_connect report the wrong system error even
+# when DNS, TCP, entropy and the CA bundle are all healthy.
+#
+# Keep this deliberately free of provider/engine directives: Asphalt embeds
+# OpenSSL and does not ship loadable modules.  The file establishes a valid
+# top-level app configuration without weakening peer or hostname validation.
+openssl_conf = macws_openssl_init
+
+[macws_openssl_init]

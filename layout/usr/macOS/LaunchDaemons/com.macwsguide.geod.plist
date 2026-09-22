@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.macwsguide.geod</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/jb/usr/macOS/PrivateFrameworks/GeoServices.framework/Versions/A/XPCServices/GeodProxy.xpc/GeodProxy</string>
+    </array>
+    <key>MachServices</key>
+    <dict>
+        <key>com.apple.macosbooter.geod</key>
+        <true/>
+    </dict>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CA_VSYNC_OFF</key>
+        <string>1</string>
+        <key>MACWS_AGX_NATIVE</key>
+        <string>1</string>
+        <key>MACWS_AGX_REGISTER_CLASSES</key>
+        <string>1</string>
+        <key>XPC_SERVICE_NAME</key>
+        <string>com.macwsguide.geod</string>
+    </dict>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/var/jb/var/mobile/geod-macos.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/jb/var/mobile/geod-macos.log</string>
+</dict>
+</plist>

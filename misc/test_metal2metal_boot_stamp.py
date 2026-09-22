@@ -1,0 +1,117 @@
+"""Execute the production shell fingerprint against owned filesystem fixtures."""
+import os
+from pathlib import Path
+import shlex
+import string
+import subprocess
+import tempfile
+import unittest
+
+REPO = Path(__file__).resolve().parents[1]
+SCRIPT = REPO / "layout/usr/macOS/bin/ensure_metal2metal_compat.sh"
+
+
+class MetalBootStamp(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="macws-metal-stamp-")
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        source = SCRIPT.read_text()
+        start = source.index("metal2metal_runtime_stamp() {")
+        end = source.index("\nmetal2metal_sha256()", start)
+        self.function = source[start:end]
+        self.function = self.function.replace("/var/jb/usr/macOS", str(self.base / "jb"))
+        self.values = {
+            "ROOTFS": str(self.base / "rootfs"),
+            "METAL2METAL": str(self.base / "jb/bin/metal2metal.py"),
+            "OFFICE_PROVISIONER": str(self.base / "jb/bin/ensure_office_metal2metal.py"),
+            "APPLE_LLVM_DIS": str(self.base / "jb/bin/macws-llvm-dis"),
+            "APPLE_LLVM_AS": str(self.base / "jb/bin/macws-llvm-as"),
+            "ROUTE_DIR": str(self.base / "rootfs/usr/local/share/macws/metal2metal/routes"),
+        }
+        # Execute the actual required/optional loops; only OS tools are faked.
+        required = self.function.split("for path in", 1)[1].split("; do", 1)[0]
+        for token in shlex.split(required.replace("\\\n", "")):
+            self.create(Path(string.Template(token).substitute(self.values)))
+        self.stat = self.base / "stat.py"
+        self.stat.write_text("import os,sys\ns=os.stat(sys.argv[-1])\n"
+                            "assert sys.argv[sys.argv.index('-c')+1]=='%d:%i:%s:%y:%z'\n"
+                            "print(f'{s.st_dev}:{s.st_ino}:{s.st_size}:{s.st_mtime_ns}:{s.st_ctime_ns}')\n")
+        self.function = self.function.replace("/var/jb/usr/bin/stat", "python3 " + shlex.quote(str(self.stat)))
+        self.function = self.function.replace("/var/jb/usr/bin/sha256sum", "shasum -a 256")
+        self.function = self.function.replace("/var/jb/usr/bin/tr", "tr")
+        self.function = self.function.replace("/var/jb/usr/bin/awk", "awk")
+
+    def create(self, path, data=b"fixture"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return path
+
+    def stamp(self, boot="first-boot"):
+        function = self.function.replace("/var/jb/usr/sbin/sysctl", "printf " + shlex.quote(boot))
+        script = "set -o pipefail\n" + "\n".join(
+            key + "=" + shlex.quote(value) for key, value in self.values.items())
+        result = subprocess.run(["bash", "-c", script + "\n" + function +
+                                 "\nmetal2metal_runtime_stamp"], text=True,
+                                capture_output=True, timeout=10, check=True)
+        self.assertRegex(result.stdout, r"^[0-9a-f]{64}\n$")
+        return result.stdout
+
+    def test_boot_helper_and_optional_app_install_invalidate(self):
+        first = self.stamp()
+        self.assertEqual(first, self.stamp())
+        self.assertNotEqual(first, self.stamp("second-boot"))
+        app = Path(self.values["ROOTFS"]) / "Applications/Microsoft Word.app/Contents/Resources/Arc.bundle/Metal2DShaders.metallib.zip"
+        self.create(app)
+        installed = self.stamp()
+        self.assertNotEqual(first, installed)
+        self.create(Path(self.values["OFFICE_PROVISIONER"]), b"updated helper")
+        self.assertNotEqual(installed, self.stamp())
+
+    def test_output_manifest_replacement_and_removal_invalidate(self):
+        first = self.stamp()
+        output = Path(self.values["ROOTFS"]) / "usr/local/share/macws/metal2metal/office/hash/output.metallib"
+        route = Path(self.values["ROUTE_DIR"]) / "office-metal2d-hash.route.plist"
+        self.create(output)
+        self.create(route)
+        present = self.stamp()
+        self.assertNotEqual(first, present)
+        replacement = self.create(output.with_suffix(".new"))
+        os.replace(replacement, output)
+        replaced = self.stamp()
+        self.assertNotEqual(present, replaced)
+        route.unlink()  # Only this test's owned tempfile fixture.
+        self.assertNotEqual(replaced, self.stamp())
+
+    def test_missing_required_helper_refuses_success_stamp(self):
+        Path(self.values["OFFICE_PROVISIONER"]).unlink()
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.stamp()
+
+    def test_same_second_same_length_corruption_invalidates(self):
+        output = Path(self.values["ROOTFS"]) / "usr/local/share/macws/metal2metal/office/hash/output.metallib"
+        self.create(output, b"MTLBoriginal")
+        # Model an APFS stat observation with a constant inode/size/whole-second
+        # mtime/ctime and real varying nanoseconds. Pin ctime only in this owned
+        # fixture to avoid wall-clock scheduling across a second making the
+        # test accidentally pass with the old seconds-only format.
+        self.stat.write_text(
+            "import os,sys\ns=os.stat(sys.argv[-1])\n"
+            "fmt=sys.argv[sys.argv.index('-c')+1]\n"
+            "assert fmt=='%d:%i:%s:%y:%z'\n"
+            f"ctime=1234567890000000000 if sys.argv[-1]=={str(output)!r} else s.st_ctime_ns\n"
+            "print(f'{s.st_dev}:{s.st_ino}:{s.st_size}:{s.st_mtime_ns}:{ctime}')\n")
+        second = 1234567890000000000
+        os.utime(output, ns=(second, second + 100))
+        before = output.stat()
+        stamp = self.stamp()
+        output.write_bytes(b"MTLBcorrupt!")
+        os.utime(output, ns=(second, second + 200))
+        after = output.stat()
+        self.assertEqual((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns // 10**9),
+                         (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns // 10**9))
+        self.assertNotEqual(stamp, self.stamp())
+
+
+if __name__ == "__main__":
+    unittest.main()

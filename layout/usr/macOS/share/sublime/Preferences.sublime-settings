@@ -1,0 +1,7 @@
+{
+	// macOS's platform defaults select OpenGL, but MacWS currently exposes
+	// Apple's GLRendererFloat software fallback rather than a hardware OpenGL
+	// renderer. Sublime's supported CPU path avoids blocking each editor
+	// refresh in CAOpenGLLayer while preserving its normal text pipeline.
+	"hardware_acceleration": "none"
+}

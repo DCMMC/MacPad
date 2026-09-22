@@ -1,0 +1,42 @@
+{
+  "name": "macws-aquarium-runner",
+  "displayName": "MacWS Aquarium Runner",
+  "description": "Provides MacWS web-link routing and the repeatable WebGL Aquarium workload in VS Code's built-in Simple Browser.",
+  "version": "0.0.2",
+  "publisher": "macwsguide",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:macwsAquarium.open"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "macwsAquarium.open",
+        "title": "Open WebGL Aquarium",
+        "category": "MacWS"
+      }
+    ],
+    "configuration": {
+      "title": "MacWS Aquarium Runner",
+      "properties": {
+        "macwsAquarium.url": {
+          "type": "string",
+          "default": "https://webglsamples.org/aquarium/aquarium.html?numFish=1000&canvasWidth=1024&canvasHeight=1024&fitWindow=false",
+          "description": "WebGL workload URL opened in VS Code's built-in Simple Browser."
+        },
+        "macwsAquarium.openOnStartup": {
+          "type": "boolean",
+          "default": false,
+          "description": "Open the 60,000-fish workload automatically after the VS Code workbench becomes ready. Keep this disabled for ordinary browsing and video playback so the benchmark does not compete for GPU memory."
+        }
+      }
+    }
+  }
+}

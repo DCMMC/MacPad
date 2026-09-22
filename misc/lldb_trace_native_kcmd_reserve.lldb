@@ -1,0 +1,11 @@
+# Current-boot iOS AGXG13GFamilyCommandBuffer reserve IMP.  Stop on the
+# first reservation and identify the actual producer call site.  The record is
+# assembled from smaller reservations, so filtering for the final 0x7c8 span
+# misses the producer entirely.
+breakpoint set --address 0x221a0c474
+continue
+register read x0 x1 x2 x19 x20 x21 x29 x30 pc
+thread backtrace -c 40
+disassemble --start-address '$lr-0x40' --count 64
+detach
+quit

@@ -1,0 +1,19 @@
+settings set target.process.stop-on-sharedlibrary-events false
+command script import misc/lldb_watch_native_kcmd_field.py
+# Enter before AGX consumes the render-pass descriptor and capture storage.
+breakpoint set --address 0x221a0e044 --one-shot true
+continue
+script lldb_watch_native_kcmd_field.capture_base(lldb.debugger)
+# Runtime watchpoint evidence identified this as the return immediately after
+# the producer's full-record bzero.  Arm only after it, so the next stop is a
+# semantic field writer rather than initialization.
+breakpoint set --address 0x221ae19b8 --one-shot true
+continue
+script lldb_watch_native_kcmd_field.arm(lldb.debugger, 0x3a0)
+continue
+watchpoint list
+register read x0 x1 x2 x3 x8 x9 x10 x19 x20 x21 x22 x23 x24 x25 x26 x27 x28 x29 x30 pc
+thread backtrace -c 50
+disassemble --start-address '$pc-0x50' --count 96
+detach
+quit

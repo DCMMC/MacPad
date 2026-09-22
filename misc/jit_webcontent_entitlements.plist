@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Minimal reference policy from iOS 16.3's Apple WebContent binary. -->
+    <key>com.apple.private.verified-jit</key>
+    <true/>
+    <key>dynamic-codesigning</key>
+    <true/>
+
+    <!-- Required for an ad-hoc/trust-cached research binary to receive the
+         same CS_PLATFORM_BINARY class as the Apple-signed reference. -->
+    <key>platform-application</key>
+    <true/>
+    <key>get-task-allow</key>
+    <true/>
+</dict>
+</plist>

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.macwsguide.jitprobe</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/jb/var/mobile/jit_mmap_probe_ios_verified</string>
+        <string>first-map-jit</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>UserName</key>
+    <string>root</string>
+    <key>StandardOutPath</key>
+    <string>/var/jb/var/mobile/jitprobe.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/jb/var/mobile/jitprobe.log</string>
+</dict>
+</plist>

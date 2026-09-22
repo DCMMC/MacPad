@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.macwsguide.extensionkit</string>
+    <key>ProgramArguments</key>
+    <array>
+        <!--
+          The freestanding iOS first image enters the macOS root before
+          libSystem consumes launchd state.  The real Ventura service then
+          serves its unchanged protocol on a private name so it cannot collide
+          with iPadOS extensionkitservice.
+        -->
+        <string>/var/jb/usr/macOS/Frameworks/ExtensionFoundation.framework/Versions/A/XPCServices/ExtensionKitProxy.xpc/ExtensionKitProxy</string>
+    </array>
+    <key>MachServices</key>
+    <dict>
+        <key>com.apple.macosbooter.extensionkitservice</key>
+        <true/>
+    </dict>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CA_VSYNC_OFF</key>
+        <string>1</string>
+        <key>MACWS_AGX_NATIVE</key>
+        <string>1</string>
+        <key>MACWS_AGX_REGISTER_CLASSES</key>
+        <string>1</string>
+        <key>XPC_SERVICE_NAME</key>
+        <string>com.macwsguide.extensionkit</string>
+    </dict>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/var/jb/var/mobile/extensionkitservice-macos.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/jb/var/mobile/extensionkitservice-macos.log</string>
+</dict>
+</plist>

@@ -1,0 +1,22 @@
+settings set target.memory-module-load-level minimal
+settings set target.process.stop-on-sharedlibrary-events true
+command script import misc/lldb_trace_pf550_updatebind.py
+process handle -s false -n false -p false SIGSTOP
+script lldb_trace_pf550_updatebind.wait_for_agx_and_install_compression_query(lldb.debugger)
+settings set target.process.stop-on-sharedlibrary-events false
+process handle -s false -n false -p true SIGSEGV SIGBUS
+script lldb_trace_pf550_updatebind.continue_until_target(lldb.debugger)
+register read x0 x1 x16 x17 lr pc
+thread backtrace
+thread step-inst
+register read x0 x1 x16 x17 lr pc
+thread step-inst
+register read x0 x1 x16 x17 lr pc
+thread step-inst
+register read x0 x1 x16 x17 lr pc
+image lookup -a $x16
+disassemble --start-address $x16 --count 96
+script lldb_trace_pf550_updatebind.arm_compression_query_return(lldb.debugger)
+continue
+register read x0 x1 x16 x17 lr pc
+thread backtrace

@@ -1,0 +1,27 @@
+settings set target.memory-module-load-level minimal
+settings set target.process.stop-on-sharedlibrary-events true
+command script import misc/lldb_trace_pf550_updatebind.py
+script lldb_trace_pf550_updatebind.TEXT_STATIC_BASE=0x20c98f000
+script lldb_trace_pf550_updatebind.UPDATE_BIND_STATIC=0x20ccd8234
+script lldb_trace_pf550_updatebind.UPDATE_BIND_THREE_ARG_STATIC=0x20ccd76bc
+script lldb_trace_pf550_updatebind.UPDATE_BIND_TWO_ARG_STATIC=0x20ccd76b4
+script lldb_trace_pf550_updatebind.THREE_ARG_DEVICE_GATE_STATIC=0x20ccd76f0
+script lldb_trace_pf550_updatebind.THREE_ARG_DISPATCH_STATIC=0x20ccd772c
+process handle -s false -n false -p false SIGSTOP
+script lldb_trace_pf550_updatebind.wait_for_agx_and_install_three(lldb.debugger)
+settings set target.process.stop-on-sharedlibrary-events false
+process handle -s false -n false -p true SIGSEGV SIGBUS
+script lldb_trace_pf550_updatebind.continue_until_target(lldb.debugger)
+register read x0 x1 x2 x3 x4 x5 x6 x22 lr pc
+thread backtrace
+script lldb_trace_pf550_updatebind.arm_three_arg_device_gate(lldb.debugger)
+continue
+register read x0 x8 x19 x20 x21 x22 lr pc
+script lldb_trace_pf550_updatebind.dump_three_arg_device_gate(lldb.debugger)
+disassemble --start-address $pc-64 --count 40
+script lldb_trace_pf550_updatebind.arm_three_arg_dispatch(lldb.debugger)
+continue
+register read x0 x2 x3 x4 x5 x6 x19 x20 x21 x22 lr pc
+script lldb_trace_pf550_updatebind.dump_target_impl(lldb.debugger, "native-three-arg-dispatch")
+thread backtrace
+process kill

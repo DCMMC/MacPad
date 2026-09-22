@@ -1,0 +1,7 @@
+settings set target.process.stop-on-sharedlibrary-events true
+command script import misc/lldb_trace_pf550_updatebind.py
+script lldb_trace_pf550_updatebind.wait_for_agx_and_install(lldb.debugger)
+settings set target.process.stop-on-sharedlibrary-events false
+continue
+register read x0 x1 x2 x3 x4 x5 x6 lr pc
+thread backtrace

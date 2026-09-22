@@ -1,0 +1,18 @@
+# Direct-address fallback for the actual macOS 13.4 QuartzCore image when LLDB
+# cannot load the 3.3-GiB on-device shared cache's symbol table.
+#
+# Old runtime evidence in /tmp/macws-pf80-coexist.err:
+#   SkyLight WSCompositeDestinationCreateWithMetalTexture
+#       runtime 0x18d79453c, static 0x18523053c -> slide 0x8564000
+#   current_page_surface frame 0x1901fecf8 at +952 -> start 0x1901fe940
+#   currentSurface frame         0x19018ee0c at +116 -> start 0x19018ed98
+# Therefore the stable unslid starts are 0x187c9a940 and 0x187c2ad98.
+# The current boot's read-only `image list QuartzCore` reports slide 0x15f94000.
+image list -o -f QuartzCore
+disassemble --start-address 0x19dc2e940 --end-address 0x19dc2f340
+disassemble --start-address 0x19dbbed98 --end-address 0x19dbbef98
+# Adjacent IOMFBDisplay::present_surface path.  Its embedded diagnostic at
+# 0x19dc2f33c is "present_surface: swap_end returned error 0x%x".
+disassemble --start-address 0x19dc2f108 --end-address 0x19dc2fb00
+# Small IOMobileFramebuffer call veneers reached by present_surface.
+disassemble --start-address 0x19dc53a80 --end-address 0x19dc53c20

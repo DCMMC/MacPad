@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.apple.uikitsystemapp</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/jb/usr/macOS/bin/launchdchrootexec</string>
+        <string>0</string>
+        <string>0</string>
+        <string>/var/mnt/rootfs</string>
+        <string>/System/Library/CoreServices/UIKitSystem.app/Contents/MacOS/UIKitSystem</string>
+        <string>system_app_start</string>
+    </array>
+    <key>MachServices</key>
+    <dict>
+        <key>com.apple.macosbooter.frontboard.systemappservices</key>
+        <true/>
+    </dict>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CA_VSYNC_OFF</key>
+        <string>1</string>
+        <key>__CFBundleIdentifier</key>
+        <string>com.apple.UIKitSystemApp</string>
+        <key>COMMAND_MODE</key>
+        <string>unix2003</string>
+        <!-- UIKitSystem owns the CoreServices repository used to bootstrap
+             Mac Catalyst children.  Keep its CFURL/statfs/fsgetpath view in
+             the same logical chroot namespace as lsd and Finder. -->
+        <key>MACWS_APP_MOUNT_COMPAT</key>
+        <string>1</string>
+    </dict>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>EnablePressuredExit</key>
+    <true/>
+    <key>EnableTransactions</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>2</integer>
+    <key>StandardOutPath</key>
+    <string>/var/jb/var/mobile/uikitsystem.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/jb/var/mobile/uikitsystem.log</string>
+</dict>
+</plist>

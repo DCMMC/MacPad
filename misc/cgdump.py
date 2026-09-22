@@ -1,0 +1,23 @@
+import ctypes, sys, struct
+cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+cf = ctypes.CDLL('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
+def S(l,n,r,a): f=getattr(l,n); f.restype=r; f.argtypes=a; return f
+S(cg,"CGMainDisplayID",ctypes.c_uint32,[])
+S(cg,"CGDisplayCreateImage",ctypes.c_void_p,[ctypes.c_uint32])
+S(cg,"CGImageGetWidth",ctypes.c_size_t,[ctypes.c_void_p])
+S(cg,"CGImageGetHeight",ctypes.c_size_t,[ctypes.c_void_p])
+S(cg,"CGImageGetBytesPerRow",ctypes.c_size_t,[ctypes.c_void_p])
+S(cg,"CGImageGetDataProvider",ctypes.c_void_p,[ctypes.c_void_p])
+S(cg,"CGDataProviderCopyData",ctypes.c_void_p,[ctypes.c_void_p])
+S(cf,"CFDataGetLength",ctypes.c_long,[ctypes.c_void_p])
+S(cf,"CFDataGetBytePtr",ctypes.c_void_p,[ctypes.c_void_p])
+did=cg.CGMainDisplayID(); img=cg.CGDisplayCreateImage(did)
+if not img: print("NULL img"); sys.exit(2)
+w=cg.CGImageGetWidth(img); h=cg.CGImageGetHeight(img); bpr=cg.CGImageGetBytesPerRow(img)
+dp=cg.CGImageGetDataProvider(img); data=cg.CGDataProviderCopyData(dp)
+n=cf.CFDataGetLength(data); p=cf.CFDataGetBytePtr(data)
+buf=(ctypes.c_ubyte*n).from_address(p)
+nz=sum(1 for i in range(0,n,101) if buf[i]>8)
+with open("/tmp/screen.raw","wb") as f:
+    f.write(struct.pack("<III", w, h, bpr)); f.write(bytes(buf))
+print("w=%d h=%d bpr=%d datalen=%d nonblack(sampled)=%d -> /tmp/screen.raw"%(w,h,bpr,n,nz))

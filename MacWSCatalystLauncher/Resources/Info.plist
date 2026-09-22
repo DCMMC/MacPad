@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>MacWS Catalyst Launcher</string>
+	<key>CFBundleExecutable</key>
+	<string>MacWSCatalystLauncher</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.macwsguide.catalystlauncher</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>MacWSCatalystLauncher</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.macwsguide.catalystlauncher</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>macwscatalyst</string>
+			</array>
+		</dict>
+	</array>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>MinimumOSVersion</key>
+	<string>16.0</string>
+	<!--
+	  iPadOS launchservicesd is also the PlugInKit database used by chroot
+	  System Settings.  Register the stock macOS Settings extension-point
+	  contract with the same hidden carrier bundle that owns the metadata-only
+	  Appearance appex.  The executable launch is still translated to the
+	  separate no-sandbox APPL first image by MacWSCatalystLaunch.
+	-->
+	<key>NSExtensionSDK</key>
+	<dict>
+		<key>com.apple.Settings.extension.ui</key>
+		<dict>
+			<key>EXExtensionPointConfiguration</key>
+			<dict>
+				<key>EXFrameworkModules</key>
+				<array>
+					<string>Settings</string>
+				</array>
+				<key>EXPresentsUserInterface</key>
+				<true/>
+				<key>EXRequiredEntitlements</key>
+				<dict>
+					<key>com.apple.Settings.extension.host</key>
+					<true/>
+				</dict>
+				<key>EXSupportsCatalyst</key>
+				<true/>
+			</dict>
+			<key>EXExtensionPointIsPublic</key>
+			<false/>
+			<key>NSExtension</key>
+			<dict>
+				<key>NSExtensionPointIdentifier</key>
+				<string>com.apple.Settings.extension.ui</string>
+				<key>NSExtensionPrincipalClassProhibited</key>
+				<true/>
+				<key>NSExtensionSandboxProfile</key>
+				<string>settings-extensions</string>
+			</dict>
+		</dict>
+	</dict>
+	<key>SBAppTags</key>
+	<array>
+		<string>hidden</string>
+	</array>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneClassName</key>
+					<string>UIWindowScene</string>
+					<key>UISceneConfigurationName</key>
+					<string>MacWS Catalyst Bootstrap</string>
+					<key>UISceneDelegateClassName</key>
+					<string>MacWSCatalystLauncherSceneDelegate</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UIRequiresFullScreen</key>
+	<false/>
+	<key>UIDeviceFamily</key>
+	<array>
+		<integer>2</integer>
+	</array>
+</dict>
+</plist>

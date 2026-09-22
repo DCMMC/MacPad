@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Diagnostic-only parity with /usr/libexec/runningboardd. -->
+    <key>platform-application</key>
+    <true/>
+    <key>com.apple.private.xpc.launchd.app-server</key>
+    <true/>
+    <key>com.apple.private.xpc.domain-extension.proxy</key>
+    <true/>
+    <key>com.apple.private.xpc.launchd.job-manager</key>
+    <string>com.apple.runningboard</string>
+</dict>
+</plist>

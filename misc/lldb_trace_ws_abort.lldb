@@ -1,0 +1,16 @@
+settings set target.process.stop-on-sharedlibrary-events false
+settings set target.inline-breakpoint-strategy always
+breakpoint set --name __assert_rtn
+breakpoint set --name abort_with_payload
+breakpoint set --name abort
+breakpoint set --name __abort_with_payload
+breakpoint list
+continue
+thread list
+thread backtrace all -c 40
+register read x0 x1 x2 x3 x4 x5 x6 x7 x19 x20 x21 x22 x23 x24 x25 x26 x27 x28 fp lr sp pc cpsr
+memory read --force --format x --size 1 --count 128 $x2
+memory read --force --cstring --size 1 --count 1 $x2
+memory read --force --cstring --size 1 --count 1 $x4
+memory read --force --format x --size 1 --count 256 $sp
+disassemble --frame --count 24

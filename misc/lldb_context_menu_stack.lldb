@@ -1,0 +1,3 @@
+settings set thread-format "thread #${thread.index}: tid = ${thread.id%tid}, ${thread.name}, queue = ${thread.queue}, stop reason = ${thread.stop-reason}\n"
+thread list
+thread backtrace all

@@ -1,0 +1,4 @@
+process status
+thread backtrace all -c 40
+detach
+quit

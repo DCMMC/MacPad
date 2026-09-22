@@ -1,0 +1,8 @@
+breakpoint set -n _CFXNotificationPost
+breakpoint command add 1
+register read x0 x1 x2 x3 x4
+memory read --format x --size 8 --count 8 $x1
+bt 16
+continue
+DONE
+continue

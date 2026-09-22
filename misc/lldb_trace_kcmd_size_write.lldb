@@ -1,0 +1,14 @@
+# Runtime-confirmed KCMD storage base for the current WindowServer session.
+# The submit diagnostic showed buffers #1..#8 all reuse 0x100fc4000 and place
+# the first subtype-1 size field at +0x2c.  Stop only when the macOS producer
+# writes 0x7e8, before the temporary submit adapter rewrites it to 0x7c8.
+watchpoint set expression --watch write --size 4 -- 0x100fc402c
+watchpoint modify --condition '*(unsigned int *)0x100fc402c == 0x7e8'
+continue
+register read x0 x1 x2 x3 x8 x9 x10 x11 x19 x20 x21 x22 x29 x30 pc
+memory read --format x --size 4 --count 16 0x100fc4000
+thread backtrace -c 40
+disassemble --start-address '$pc-0x20' --count 32
+image list -o -f
+detach
+quit

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.macwsguide.macos-locationd</string>
+    <key>POSIXSpawnType</key>
+    <string>Adaptive</string>
+    <key>ProgramArguments</key>
+    <array>
+        <!-- The first image must preserve launchd's inherited Mach-service
+             activation context until Ventura locationd initializes libxpc.
+             launchdchrootexec's later posix_spawn(SETEXEC) loses the pending
+             listener transaction, so locationd sees zero clients and exits
+             on its hard-coded three-second idle timer.  This freestanding
+             proxy enters the chroot and raw-execs locationd before libxpc is
+             initialized. -->
+        <string>/var/jb/usr/macOS/PrivateFrameworks/CoreLocation.framework/XPCServices/LocationdProxy.xpc/LocationdProxy</string>
+    </array>
+    <key>MachServices</key>
+    <dict>
+        <key>com.apple.macosbooter.locationd.desktop.agent</key>
+        <true/>
+        <key>com.apple.macosbooter.locationd.desktop.registration</key>
+        <true/>
+        <key>com.apple.macosbooter.locationd.desktop.spi</key>
+        <true/>
+        <key>com.apple.macosbooter.locationd.desktop.synchronous</key>
+        <true/>
+        <key>com.apple.macosbooter.locationd.simulation</key>
+        <true/>
+    </dict>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>NSRunningFromLaunchd</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <!-- Match Ventura's stock locationd transaction/lifecycle contract. -->
+    <key>EnablePressuredExit</key>
+    <false/>
+    <key>EnableTransactions</key>
+    <true/>
+    <!-- Do not copy Ventura's SuccessfulExit=false semaphore here.  With the
+         service names isolated from the native daemon it causes an empty
+         first launch; RE-confirmed CLDaemonCore::startRun then hard-codes a
+         three-second idle shutdown.  Leaving KeepAlive absent registers the
+         endpoints without launching and lets the pending client message own
+         the first lifecycle transaction. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>/var/jb/var/mobile/macos-locationd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/jb/var/mobile/macos-locationd.log</string>
+</dict>
+</plist>

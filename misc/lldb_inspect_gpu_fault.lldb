@@ -1,0 +1,25 @@
+settings set target.process.stop-on-sharedlibrary-events false
+process status
+thread list
+
+# Runtime-confirmed BIF0 read-fault VAs from the current gpuEvent reports.
+memory region 0x1159f20000
+memory region 0x1181f88000
+memory read --force -fx -s8 -c8 0x1159f20000
+memory read --force -fx -s8 -c8 0x1181f88000
+
+# Same-run texture audit witnesses: CPU mapping followed by AGX GPU address.
+memory region 0x113af4000
+memory region 0x1540068000
+memory region 0x114a3c000
+memory region 0x1540fb8000
+memory region 0x1268dd800
+memory region 0x1792030000
+memory region 0x144800000
+memory region 0x17933f0000
+
+thread backtrace -c 24
+
+# This WindowServer is intentionally held by the one-frame SIGSTOP circuit
+# breaker.  Do not let debugger detach resume the failed allocation loop.
+process detach --keep-stopped true

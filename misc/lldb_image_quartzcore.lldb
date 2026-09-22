@@ -1,0 +1,4 @@
+image list -o -f QuartzCore
+image lookup --address 0x1a6f419f0
+image lookup --address 0x1a6f3eb00
+image lookup --address 0x1a70cfbe0

@@ -1,0 +1,9 @@
+# Read-only RE of the actual macOS 13.4 QuartzCore image loaded by the chroot
+# WindowServer.  Run through misc/lldb_trace_runner.sh; the runner detaches.
+image list -o -f QuartzCore
+image lookup -rn 'IOMFBDisplay'
+image lookup -rn 'current_page_surface'
+image lookup -rn 'CAWindowServerDisplay.*currentSurface'
+image lookup -rn 'IOMFBServer.*(page|frame|swap|surface)'
+disassemble -n '_ZN2CA12WindowServer12IOMFBDisplay20current_page_surfaceEbbbbyb'
+disassemble -n '-[CAWindowServerDisplay currentSurface:protection:needsClear:readOnly:vsyncOff:]'

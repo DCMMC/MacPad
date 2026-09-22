@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.macwsguide.hiservices</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/jb/usr/macOS/Frameworks/HIServices.framework/Versions/A/XPCServices/HIServicesProxy.xpc/HIServicesProxy</string>
+    </array>
+    <key>MachServices</key>
+    <dict>
+        <key>com.apple.macosbooter.hiservices-xpcservice</key>
+        <true/>
+    </dict>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- HIServices owns application/input metadata only.  Giving this
+             6-MB iOS launchd daemon the renderer's AGX environment makes
+             libmachook eagerly load IOGPU/AGXMetal, so launchd kills it
+             before it can reply to synchronous HIToolbox requests. -->
+        <key>XPC_SERVICE_NAME</key>
+        <string>com.macwsguide.hiservices</string>
+    </dict>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/var/jb/var/mobile/hiservices-xpc.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/jb/var/mobile/hiservices-xpc.log</string>
+</dict>
+</plist>

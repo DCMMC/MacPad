@@ -1,0 +1,829 @@
+# No shebang: this jailbreak's AMFI blocks execve of shebang scripts. dpkg
+# invokes maintainer scripts through its shell.
+
+HOSTD=/var/jb/usr/macOS/bin/macwshostd
+HOSTD_PLIST=/var/jb/Library/LaunchDaemons/com.macwsguide.hostd.plist
+KEYCHAIND=/var/jb/usr/macOS/bin/macwskeychaind
+KEYCHAIND_PLIST=/var/jb/Library/LaunchDaemons/com.macwsguide.keychain.plist
+VIEWBRIDGE_PROXY=/var/jb/usr/macOS/Frameworks/ViewBridge.framework/Versions/A/XPCServices/ViewBridgeAuxiliary.xpc/ViewBridgeAuxiliary
+HISERVICES_PROXY=/var/jb/usr/macOS/Frameworks/HIServices.framework/Versions/A/XPCServices/HIServicesProxy.xpc/HIServicesProxy
+OPEN_SAVE_PANEL_PROXY=/var/jb/usr/macOS/Frameworks/AppKit.framework/Versions/C/XPCServices/OpenAndSavePanelProxy.xpc/OpenAndSavePanelProxy
+QUICKLOOK_UI_PROXY=/var/jb/usr/macOS/Frameworks/QuickLookUI.framework/Versions/A/XPCServices/QuickLookUIServiceProxy.xpc/QuickLookUIServiceProxy
+DOCK_HELPER_PROXY=/var/jb/usr/macOS/Frameworks/Dock.framework/Versions/A/XPCServices/DockHelperProxy.xpc/DockHelperProxy
+EXTENSIONKIT_PROXY=/var/jb/usr/macOS/Frameworks/ExtensionFoundation.framework/Versions/A/XPCServices/ExtensionKitProxy.xpc/ExtensionKitProxy
+GEOD_PROXY=/var/jb/usr/macOS/PrivateFrameworks/GeoServices.framework/Versions/A/XPCServices/GeodProxy.xpc/GeodProxy
+WRITE_CONFIG_PROXY=/var/jb/usr/macOS/PrivateFrameworks/SystemAdministration.framework/XPCServices/WriteConfigProxy.xpc/WriteConfigProxy
+LOCATIOND_PROXY=/var/jb/usr/macOS/PrivateFrameworks/CoreLocation.framework/XPCServices/LocationdProxy.xpc/LocationdProxy
+SETTINGS_EXTENSION_PROXY=/var/jb/Applications/SettingsExtensionProxy.app/SettingsExtensionProxy
+LOCATION_BRIDGE=/var/jb/usr/macOS/bin/macwslocationd
+MACHO_PATCHER=/var/jb/usr/macOS/bin/set_macos_version.py
+LIBMACHOOK=/var/jb/usr/macOS/lib/libmachook.dylib
+LIBMACHOOK_ARM64=/var/jb/usr/macOS/lib/libmachook_arm64.dylib
+ENTITLEMENTS=/var/jb/usr/macOS/bin/entitlements.plist
+CFPREFSD_ENTITLEMENTS=/var/jb/usr/macOS/bin/cfprefsd-entitlements.plist
+EXTENSIONKIT_ENTITLEMENTS=/var/jb/usr/macOS/bin/extensionkitservice-entitlements.plist
+APPEARANCE_ENTITLEMENTS=/var/jb/usr/macOS/bin/appearance-extension-entitlements.plist
+CORELOCATIONAGENT_NATIVE_ENTITLEMENTS=/var/jb/usr/macOS/bin/corelocationagent-native-entitlements.plist
+LOCATIOND_NATIVE_ENTITLEMENTS=/var/jb/usr/macOS/bin/locationd-native-entitlements.plist
+GEOD_NATIVE_ENTITLEMENTS=/var/jb/usr/macOS/bin/geod-native-entitlements.plist
+DISKARBITRATIOND_NATIVE_ENTITLEMENTS=/var/jb/usr/macOS/bin/diskarbitrationd-native-entitlements.plist
+INTEROP_LOCATION_ENTITLEMENTS=/var/jb/usr/macOS/bin/interop-location-entitlements.plist
+CODE_REQUIREMENT_WRITER=/var/jb/usr/macOS/bin/write_code_requirement.py
+WEATHER_PREPARER=/var/jb/usr/macOS/bin/prepare_weather_app.py
+LIPO=/var/jb/usr/bin/lipo
+ROOTFS=/var/mnt/rootfs
+WORKSPACE_WALLPAPER_SOURCE=/var/jb/usr/macOS/share/wallpapers/macws-forest-lake.png
+WORKSPACE_WALLPAPER_TARGET="$ROOTFS/usr/local/share/macws/wallpapers/macws-forest-lake.png"
+ANGLE_ASSET_SOURCE_DIR=/var/jb/usr/macOS/share/angle
+ANGLE_ASSET_TARGET_DIR="$ROOTFS/usr/local/share/macws/angle"
+SUBLIME_SETTINGS_TEMPLATE=/var/jb/usr/macOS/share/sublime/Preferences.sublime-settings
+
+# This is the dpkg maintainer entry point; build_on_ios deliberately does not
+# repeat the separate deep rootfs repair script. Audit the boot-scanned launch
+# authority here too, before publishing a new Host daemon or changing runtime.
+/var/jb/usr/bin/python3 /var/jb/usr/macOS/bin/macws_retire_legacy_boot_jobs.py || {
+    echo 'ERROR: Unresolved legacy MacWS boot launch configuration.' >&2
+    exit 1
+}
+
+install_sublime_software_renderer_default() {
+    sublime_binary="$ROOTFS/Applications/Sublime Text.app/Contents/MacOS/sublime_text"
+    settings_directory="$ROOTFS/var/root/Library/Application Support/Sublime Text/Packages/User"
+    settings_path="$settings_directory/Preferences.sublime-settings"
+    [ -x "$sublime_binary" ] || return 0
+    [ -f "$SUBLIME_SETTINGS_TEMPLATE" ] || return 1
+
+    # The shipped macOS platform setting selects OpenGL. On this device that
+    # is runtime-confirmed to render through GLRendererFloat and to hold
+    # Sublime's main thread in CAOpenGLLayer for most of an input refresh.
+    # Seed the application's supported CPU path only for a pristine profile;
+    # never replace an existing User preferences file.
+    if [ ! -e "$settings_path" ]; then
+        mkdir -p "$settings_directory" || return 1
+        cp "$SUBLIME_SETTINGS_TEMPLATE" "$settings_path" || return 1
+        chown root:wheel "$settings_path" 2>/dev/null || true
+        chmod 0644 "$settings_path" || return 1
+        echo 'Installed MacWS Sublime CPU-renderer default.'
+    fi
+}
+
+# A package install may replace libmachook or an ExtensionKit carrier.  Force
+# the next launch through the deep verifier before allowing the boot cache.
+rm -f /tmp/macws-settings-runtime.boot-ready \
+      /tmp/macws-base-trust.boot-ready
+# Third-party /Applications CodeDirectories are not package payloads. Keep the
+# same-boot trust marker: postinst already registers every signature it does
+# mutate, while deleting this unrelated marker forced the next routine service
+# restart to run ldid over 12 bundles / 1156 Mach-O images (174 seconds in the
+# 2026-08-17 device trace). A real iOS reboot still changes kern.boottime and
+# therefore takes the complete cold-boot verification path.
+
+# Files copied directly from layout/ retain the build account's uid/gid in a
+# rootless .deb.  iPadOS launchctl rejects system-domain jobs unless their
+# plist is root-owned and not group/world writable.  Normalize the complete
+# packaged job set before either the Host app or a cold-start transaction can
+# load it; relying on the separate rootfs repair script leaves a fresh package
+# installation unable to start its very first service.
+for launch_directory in \
+    /var/jb/usr/macOS/LaunchDaemons \
+    /var/jb/usr/macOS/gui-launchd; do
+    [ -d "$launch_directory" ] || continue
+    chown root:wheel "$launch_directory"/*.plist 2>/dev/null || true
+    chmod 0644 "$launch_directory"/*.plist 2>/dev/null || true
+done
+for launch_plist in /var/jb/Library/LaunchDaemons/com.macwsguide*.plist; do
+    [ -f "$launch_plist" ] || continue
+    chown root:wheel "$launch_plist" || exit 1
+    chmod 0644 "$launch_plist" || exit 1
+done
+
+# Runtime-confirmed on the 2026-09-14 cold boot: Terminal's unchanged signed
+# main image was owned by uid/gid 501, so macws_system_app_prepare.py rejected
+# it before spawn with its exact "root-owned regular file" policy. Normalize
+# only this canonical stock executable; do not chown an unexpected symlink or
+# any user application bundle.
+terminal_main="$ROOTFS/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"
+if [ -e "$terminal_main" ]; then
+    [ -f "$terminal_main" ] && [ ! -L "$terminal_main" ] || {
+        echo 'ERROR: Terminal main executable is not a regular file.' >&2
+        exit 1
+    }
+    chown root:wheel "$terminal_main" || exit 1
+fi
+
+# Theos builds libmachook for iOS and the chroot's macOS dyld rejects that
+# LC_BUILD_VERSION. This used to be a mandatory SSH-only step after every
+# package install. Do it before publishing the App's root control service so a
+# first launch can repair trustcaches and start the workspace by itself.
+if [ -f "$MACHO_PATCHER" ] && [ -f "$LIBMACHOOK" ]; then
+    /var/jb/usr/bin/python3 "$MACHO_PATCHER" "$LIBMACHOOK" || exit 1
+    if "$LIPO" -info "$LIBMACHOOK" 2>&1 | grep -q 'Architectures in the fat file'; then
+        tmp_arm64e="${LIBMACHOOK}.arm64e-new-$$"
+        tmp_arm64="${LIBMACHOOK_ARM64}.new-$$"
+        "$LIPO" "$LIBMACHOOK" -thin arm64e -output "$tmp_arm64e" || exit 1
+        "$LIPO" "$LIBMACHOOK" -thin arm64 -output "$tmp_arm64" || {
+            rm -f "$tmp_arm64e"
+            exit 1
+        }
+        chmod 755 "$tmp_arm64e" "$tmp_arm64"
+        mv "$tmp_arm64e" "$LIBMACHOOK"
+        mv "$tmp_arm64" "$LIBMACHOOK_ARM64"
+        echo 'Split libmachook into thin arm64e + arm64 injection libraries.'
+    fi
+    if [ ! -f "$LIBMACHOOK_ARM64" ]; then
+        echo 'macOS Host install failed: thin arm64 libmachook is missing.' >&2
+        exit 1
+    fi
+    for lib in "$LIBMACHOOK" "$LIBMACHOOK_ARM64"; do
+        # Fresh lipo output needs two signing passes before its page hashes are
+        # stable on this ldid build (runtime-confirmed Invalid Page otherwise).
+        /var/jb/usr/bin/ldid -S"$ENTITLEMENTS" -M "$lib" || exit 1
+        /var/jb/usr/bin/ldid -S"$ENTITLEMENTS" -M "$lib" || exit 1
+    done
+fi
+
+if [ -f "$HOSTD_PLIST" ]; then
+    chown root:wheel "$HOSTD_PLIST" 2>/dev/null || true
+    chmod 644 "$HOSTD_PLIST" 2>/dev/null || true
+fi
+
+if [ -x "$HOSTD" ]; then
+    for arch in arm64 arm64e; do
+        hash=$(/var/jb/usr/bin/ldid -arch "$arch" -h "$HOSTD" 2>/dev/null \
+            | grep CDHash= | cut -c8-)
+        [ -n "$hash" ] && /var/jb/usr/bin/jbctl trustcache add "$hash" 2>/dev/null || true
+    done
+fi
+
+# Asphalt's Catalyst process uses Ventura Security.framework, whose modern
+# SecItem client cannot negotiate with iPadOS 16 secd directly.  Keep the
+# narrow iOS-native adapter in launchd's mobile session so its real Keychain
+# access-group and Data Protection identity match the foreground application.
+if [ -x "$KEYCHAIND" ]; then
+    for arch in arm64 arm64e; do
+        hash=$(/var/jb/usr/bin/ldid -arch "$arch" -h "$KEYCHAIND" 2>/dev/null \
+            | grep CDHash= | cut -c8-)
+        [ -n "$hash" ] && \
+            /var/jb/usr/bin/jbctl trustcache add "$hash" 2>/dev/null || true
+    done
+    if [ -f "$KEYCHAIND_PLIST" ]; then
+        chown root:wheel "$KEYCHAIND_PLIST" || exit 1
+        chmod 0644 "$KEYCHAIND_PLIST" || exit 1
+        /var/jb/usr/bin/python3 /var/jb/usr/macOS/bin/macws_refresh_managed_job.py keychain || exit 1
+    fi
+fi
+
+for lib in "$LIBMACHOOK" "$LIBMACHOOK_ARM64"; do
+    [ -f "$lib" ] || continue
+    for arch in arm64 arm64e; do
+        hash=$(/var/jb/usr/bin/ldid -arch "$arch" -h "$lib" 2>/dev/null \
+            | grep CDHash= | cut -c8-)
+        [ -n "$hash" ] && /var/jb/usr/bin/jbctl trustcache add "$hash" 2>/dev/null || true
+    done
+done
+
+trust_installed_macho() {
+    path="$1"
+    [ -f "$path" ] || return 0
+    for arch in arm64 arm64e; do
+        hash=$(/var/jb/usr/bin/ldid -arch "$arch" -h "$path" 2>/dev/null \
+            | grep CDHash= | cut -c8-)
+        [ -n "$hash" ] && \
+            /var/jb/usr/bin/jbctl trustcache add "$hash" 2>/dev/null || true
+    done
+}
+
+ensure_interop_signature() {
+    path="$1"
+    [ -f "$path" ] || return 0
+    [ -f "$INTEROP_LOCATION_ENTITLEMENTS" ] || return 1
+    [ -f "$CODE_REQUIREMENT_WRITER" ] || return 1
+    entitlements=$(/var/jb/usr/bin/ldid -e "$path" 2>/dev/null || true)
+    needs_signature=0
+    printf '%s\n' "$entitlements" |
+        grep -Fq '<key>com.apple.private.graphics-restart-no-kill</key>' ||
+        needs_signature=1
+    printf '%s\n' "$entitlements" |
+        grep -Fq '<key>com.apple.locationd.simulation</key>' ||
+        needs_signature=1
+    /var/jb/usr/bin/ldid -q "$path" 2>/dev/null | strings |
+        grep -Fqx 'com.macwsguide.interopd' || needs_signature=1
+    if /var/jb/usr/bin/ldid -q "$path" 2>/dev/null | strings |
+        grep -Fq 'subject.CN'; then
+        needs_signature=1
+    fi
+    if [ "$needs_signature" -eq 1 ]; then
+        requirement_file="/tmp/macws-code-requirement.$$.bin"
+        /var/jb/usr/bin/python3 "$CODE_REQUIREMENT_WRITER" \
+            com.macwsguide.interopd "$requirement_file" || return 1
+        /var/jb/usr/bin/ldid -Icom.macwsguide.interopd \
+            -Q"$requirement_file" -S"$ENTITLEMENTS" -M "$path" || {
+            rm -f "$requirement_file"
+            return 1
+        }
+        /var/jb/usr/bin/ldid -Icom.macwsguide.interopd \
+            -Q"$requirement_file" -S"$INTEROP_LOCATION_ENTITLEMENTS" \
+            -M "$path" || {
+            rm -f "$requirement_file"
+            return 1
+        }
+        # This ldid build can grow __LINKEDIT on the first merge; settle the
+        # final page hashes before registering the persistent CDHash.
+        /var/jb/usr/bin/ldid -Icom.macwsguide.interopd \
+            -Q"$requirement_file" -S"$INTEROP_LOCATION_ENTITLEMENTS" \
+            -M "$path" || {
+            rm -f "$requirement_file"
+            return 1
+        }
+        rm -f "$requirement_file"
+    fi
+    ! /var/jb/usr/bin/ldid -q "$path" 2>/dev/null | strings |
+        grep -Fq 'subject.CN' || return 1
+    trust_installed_macho "$path"
+}
+
+trust_installed_macho "$VIEWBRIDGE_PROXY"
+trust_installed_macho "$HISERVICES_PROXY"
+trust_installed_macho "$OPEN_SAVE_PANEL_PROXY"
+trust_installed_macho "$QUICKLOOK_UI_PROXY"
+trust_installed_macho "$DOCK_HELPER_PROXY"
+trust_installed_macho "$EXTENSIONKIT_PROXY"
+trust_installed_macho "$GEOD_PROXY"
+trust_installed_macho "$WRITE_CONFIG_PROXY"
+trust_installed_macho "$LOCATIOND_PROXY"
+trust_installed_macho "$SETTINGS_EXTENSION_PROXY"
+trust_installed_macho "$LOCATION_BRIDGE"
+trust_installed_macho /var/jb/usr/macOS/bin/launchdchrootexec
+# Ventura 13.4's split arm64e shared cache has two fixed CodeDirectories.
+# Runtime-confirmed on a cold 2026-09-09 boot: after the executable loader
+# closure below was admitted, dyld rejected the codesign probe with
+# "code signature registration for shared cache failed" and consequently
+# could not resolve cache-resident libTLE.dylib.  These are the same exact
+# cache hashes validated by macos_gui.sh before every cold workspace start.
+for shared_cache_hash in \
+    b5da39409492ac85e5a8e8ab618fe77e2d7a2980 \
+    bbb765988e2677b98d47a549d612fa0d4af25f69; do
+    /var/jb/usr/bin/jbctl trustcache add "$shared_cache_hash" 2>/dev/null || \
+        exit 1
+done
+# The package's first chroot transaction is the native codesign seal below.
+# On a cold jailbreak boot, trusting only launchdchrootexec and codesign is not
+# sufficient: runtime-confirmed on 2026-09-09, their hashes were present while
+# dyld and both libobjc-trampolines slices were absent, and codesign was killed
+# immediately after launchdchrootexec printed its target.  Admit the real,
+# already-signed loader closure before that first exec; macos_gui.sh retains
+# the same invariant for later workspace starts.
+trust_installed_macho "$ROOTFS/usr/lib/dyld"
+trust_installed_macho "$ROOTFS/usr/lib/libobjc-trampolines.dylib"
+trust_installed_macho \
+    "$ROOTFS/System/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate"
+trust_installed_macho \
+    /var/jb/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate
+trust_installed_macho "$ROOTFS/usr/bin/codesign"
+# A fresh package install publishes new exec hooks before App-driven repair.
+# Start the matching signing daemon through the same bounded exact-name
+# supervisor so no old instance remains blocked on an unlinked socket inode.
+bash /var/jb/usr/macOS/bin/restart_autosignd.sh --force || exit 1
+ensure_interop_signature \
+    /var/jb/usr/macOS/libexec/MacWSInteropService.app/Contents/MacOS/macwsinteropd || exit 1
+
+ensure_chroot_application_signature() {
+    path="$1"
+    [ -f "$path" ] || return 0
+    entitlements=$(/var/jb/usr/bin/ldid -e "$path" 2>/dev/null || true)
+    if ! printf '%s\n' "$entitlements" |
+            grep -q '<key>com.apple.private.graphics-restart-no-kill</key>'; then
+        /var/jb/usr/bin/ldid -S"$ENTITLEMENTS" -M "$path" || return 1
+    fi
+    trust_installed_macho "$path"
+}
+
+ensure_chroot_identifier_requirement_signature() {
+    path="$1"
+    identifier="$2"
+    [ -f "$path" ] || return 0
+    [ -f "$CODE_REQUIREMENT_WRITER" ] || return 1
+
+    entitlements=$(/var/jb/usr/bin/ldid -e "$path" 2>/dev/null || true)
+    needs_signature=0
+    printf '%s\n' "$entitlements" |
+        grep -Fq '<key>com.apple.private.graphics-restart-no-kill</key>' ||
+        needs_signature=1
+    /var/jb/usr/bin/ldid -h "$path" 2>/dev/null |
+        grep -Fqx "Identifier=$identifier" || needs_signature=1
+    /var/jb/usr/bin/ldid -q "$path" 2>/dev/null | strings |
+        grep -Fqx "$identifier" || needs_signature=1
+
+    if [ "$needs_signature" -eq 1 ]; then
+        requirement_file="/tmp/macws-code-requirement.$$.bin"
+        /var/jb/usr/bin/python3 "$CODE_REQUIREMENT_WRITER" \
+            "$identifier" "$requirement_file" || return 1
+        /var/jb/usr/bin/ldid -I"$identifier" -Q"$requirement_file" \
+            -S"$ENTITLEMENTS" -M "$path" || {
+            rm -f "$requirement_file"
+            return 1
+        }
+        /var/jb/usr/bin/ldid -I"$identifier" -Q"$requirement_file" \
+            -S"$ENTITLEMENTS" -M "$path" || {
+            rm -f "$requirement_file"
+            return 1
+        }
+        rm -f "$requirement_file"
+    fi
+
+    /var/jb/usr/bin/ldid -q "$path" 2>/dev/null | strings |
+        grep -Fqx "$identifier" || return 1
+    trust_installed_macho "$path"
+}
+
+ensure_weather_signature() (
+    weather_bundle="$ROOTFS/System/Applications/Weather.app"
+    weather_path="$weather_bundle/Contents/MacOS/Weather"
+    weather_info="$weather_bundle/Contents/Info.plist"
+    [ -f "$weather_path" ] || return 0
+    [ ! -L "$weather_path" ] || return 1
+    [ -f "$weather_info" ] || return 1
+    [ -f "$WEATHER_PREPARER" ] || return 1
+    [ -f "$CODE_REQUIREMENT_WRITER" ] || return 1
+
+    # Weather can be running during dpkg configuration. Never rewrite or
+    # re-sign its mapped executable vnode: complete the signature transaction
+    # on a new same-directory inode, then atomically publish it for new execs.
+    # This subshell keeps cleanup traps local to this one transaction.
+    weather_replacement=$(mktemp "${weather_path}.package-new.XXXXXX") || return 1
+    weather_native="${weather_replacement}.native.plist"
+    weather_sanitized="${weather_replacement}.sanitized.plist"
+    weather_requirement="${weather_replacement}.requirement.bin"
+    trap 'rm -f "$weather_replacement" "$weather_native" "$weather_sanitized" "$weather_requirement"' EXIT
+    trap 'exit 1' HUP INT TERM
+    /var/jb/usr/bin/ldid -arch arm64e -e "$weather_path" > "$weather_native" 2>/dev/null || return 1
+    cp -p "$weather_path" "$weather_replacement" || return 1
+    /var/jb/usr/bin/python3 "$WEATHER_PREPARER" \
+        entitlements "$weather_native" "$weather_sanitized" || return 1
+    /var/jb/usr/bin/python3 "$WEATHER_PREPARER" \
+        manifest "$weather_info" || return 1
+    /var/jb/usr/bin/python3 "$CODE_REQUIREMENT_WRITER" \
+        'com.apple.weather' "$weather_requirement" || return 1
+    /var/jb/usr/bin/ldid -I'com.apple.weather' -Q"$weather_requirement" \
+        -S"$weather_sanitized" "$weather_replacement" &&
+    /var/jb/usr/bin/ldid -I'com.apple.weather' -Q"$weather_requirement" \
+        -S"$ENTITLEMENTS" -M "$weather_replacement" &&
+    /var/jb/usr/bin/ldid -I'com.apple.weather' -Q"$weather_requirement" \
+        -S"$ENTITLEMENTS" -M "$weather_replacement" || return 1
+
+    weather_final=$(/var/jb/usr/bin/ldid -e "$weather_replacement" 2>/dev/null || true)
+    printf '%s\n' "$weather_final" |
+        grep -Fq '<key>com.apple.private.security.storage.Weather</key>' || return 1
+    printf '%s\n' "$weather_final" |
+        grep -Fq '<key>com.apple.private.graphics-restart-no-kill</key>' || return 1
+    if printf '%s\n' "$weather_final" |
+            grep -Fq '<key>com.apple.private.security.container-required</key>'; then
+        return 1
+    fi
+    /var/jb/usr/bin/ldid -q "$weather_replacement" 2>/dev/null | strings |
+        grep -Fqx 'com.apple.weather' || return 1
+    # Do not use the best-effort existing-image helper here. A fresh executable
+    # must be admitted successfully before it replaces the known-good path.
+    weather_trusted=0
+    for weather_arch in arm64 arm64e; do
+        weather_hash=$(/var/jb/usr/bin/ldid -arch "$weather_arch" -h \
+            "$weather_replacement" 2>/dev/null | grep CDHash= | cut -c8-)
+        [ -n "$weather_hash" ] || continue
+        [ "${#weather_hash}" -eq 40 ] || return 1
+        case "$weather_hash" in *[!0-9a-fA-F]*) return 1 ;; esac
+        /var/jb/usr/bin/jbctl trustcache add "$weather_hash" || return 1
+        weather_trusted=1
+    done
+    [ "$weather_trusted" -eq 1 ] || return 1
+    mv -f "$weather_replacement" "$weather_path" || return 1
+)
+
+ensure_chroot_extensionkit_signature() {
+    path="$1"
+    [ -f "$path" ] || return 0
+    [ -f "$EXTENSIONKIT_ENTITLEMENTS" ] || return 1
+    entitlements=$(/var/jb/usr/bin/ldid -e "$path" 2>/dev/null || true)
+    if ! printf '%s\n' "$entitlements" |
+            grep -q '<key>com.apple.private.extensionkit.host.any-extension</key>'; then
+        /var/jb/usr/bin/ldid -S"$EXTENSIONKIT_ENTITLEMENTS" -M "$path" || return 1
+        /var/jb/usr/bin/ldid -S"$EXTENSIONKIT_ENTITLEMENTS" -M "$path" || return 1
+    fi
+    trust_installed_macho "$path"
+}
+
+ensure_chroot_appearance_signature() {
+    path="$1"
+    [ -f "$path" ] || return 0
+    [ -f "$APPEARANCE_ENTITLEMENTS" ] || return 1
+    entitlements=$(/var/jb/usr/bin/ldid -e "$path" 2>/dev/null || true)
+    needs_signature=0
+    printf '%s\n' "$entitlements" |
+        grep -q '<key>com.apple.security.exception.files.absolute-path.read-write</key>' ||
+        needs_signature=1
+    /var/jb/usr/bin/ldid -h "$path" 2>/dev/null |
+        grep -q '^Identifier=com.apple.Appearance-Settings.extension$' ||
+        needs_signature=1
+    if [ "$needs_signature" -eq 1 ]; then
+        # The target is exec'd directly by the freestanding proxy, before
+        # autosignd can run. Preserve Appearance's two native rights in the
+        # dedicated profile and settle __LINKEDIT with the proven two passes.
+        /var/jb/usr/bin/ldid -Icom.apple.Appearance-Settings.extension \
+            -S"$APPEARANCE_ENTITLEMENTS" -M "$path" || return 1
+        /var/jb/usr/bin/ldid -Icom.apple.Appearance-Settings.extension \
+            -S"$APPEARANCE_ENTITLEMENTS" -M "$path" || return 1
+    fi
+    trust_installed_macho "$path"
+}
+
+ensure_chroot_native_service_signature() {
+    path="$1"
+    native_entitlements="$2"
+    native_marker="$3"
+    identifier="$4"
+    [ -f "$path" ] || return 0
+    [ -f "$native_entitlements" ] || return 1
+    entitlements=$(/var/jb/usr/bin/ldid -e "$path" 2>/dev/null || true)
+    needs_signature=0
+    printf '%s\n' "$entitlements" |
+        grep -q '<key>com.apple.private.graphics-restart-no-kill</key>' ||
+        needs_signature=1
+    printf '%s\n' "$entitlements" | grep -Fq "$native_marker" ||
+        needs_signature=1
+    /var/jb/usr/bin/ldid -h "$path" 2>/dev/null |
+        grep -q "^Identifier=$identifier$" || needs_signature=1
+    if [ "$needs_signature" -eq 1 ]; then
+        /var/jb/usr/bin/ldid -I"$identifier" -S"$ENTITLEMENTS" -M "$path" ||
+            return 1
+        /var/jb/usr/bin/ldid -I"$identifier" -S"$native_entitlements" -M "$path" ||
+            return 1
+        /var/jb/usr/bin/ldid -I"$identifier" -S"$native_entitlements" -M "$path" ||
+            return 1
+    fi
+    trust_installed_macho "$path"
+}
+
+ensure_private_cfprefsd() {
+    cf_source="$ROOTFS/usr/sbin/cfprefsd"
+    cf_target="$ROOTFS/usr/local/libexec/macws-cfprefsd"
+    cf_temporary_root="$ROOTFS/private/var/.TemporaryItems"
+    cf_temporary_user="$cf_temporary_root/folders.0"
+    cf_temporary_leaf="$cf_temporary_user/TemporaryItems"
+    cf_target_dir=${cf_target%/*}
+    cf_needs_refresh=0
+    cf_entitlements=''
+
+    [ -f "$cf_source" ] || return 0
+    [ -f "$CFPREFSD_ENTITLEMENTS" ] || return 1
+    mkdir -p "$cf_target_dir" || return 1
+
+    # Ventura's CFPreferences atomic writer asks iPadOS dirhelper for a
+    # same-volume temporary hierarchy.  Runtime LLDB evidence on the target
+    # resolved these exact paths and modes; if any level is absent or has a
+    # different mode, _CFPrefsTemporaryFDToWriteTo fails with ENOENT and the
+    # daemon silently becomes non-persistent.
+    mkdir -p "$cf_temporary_leaf" || return 1
+    chown root:wheel "$cf_temporary_root" "$cf_temporary_user" \
+        "$cf_temporary_leaf" 2>/dev/null || true
+    chmod 1311 "$cf_temporary_root" || return 1
+    chmod 0700 "$cf_temporary_user" "$cf_temporary_leaf" || return 1
+
+    if [ ! -f "$cf_target" ]; then
+        cf_needs_refresh=1
+    else
+        cf_entitlements=$(/var/jb/usr/bin/ldid -e "$cf_target" 2>/dev/null || true)
+        /var/jb/usr/bin/ldid -h "$cf_target" 2>/dev/null |
+            grep -q 'Identifier=com.macwsguide.cfprefsd' || cf_needs_refresh=1
+        printf '%s\n' "$cf_entitlements" |
+            grep -q '<key>com.apple.private.graphics-restart-no-kill</key>' || cf_needs_refresh=1
+        if printf '%s\n' "$cf_entitlements" |
+             grep -q '<key>com.apple.security.system-container</key>'; then
+            cf_needs_refresh=1
+        fi
+    fi
+
+    if [ "$cf_needs_refresh" -eq 1 ]; then
+        cf_temporary="${cf_target}.package-new-$$"
+        rm -f "$cf_temporary"
+        cp "$cf_source" "$cf_temporary" || return 1
+        chmod 755 "$cf_temporary" || return 1
+        chown root:wheel "$cf_temporary" 2>/dev/null || true
+        /var/jb/usr/bin/ldid -Icom.macwsguide.cfprefsd \
+            -S"$CFPREFSD_ENTITLEMENTS" "$cf_temporary" || {
+            rm -f "$cf_temporary"
+            return 1
+        }
+        mv -f "$cf_temporary" "$cf_target" || return 1
+        echo 'Installed dedicated private macOS cfprefsd.'
+    fi
+    trust_installed_macho "$cf_target"
+}
+
+install_chroot_runtime() {
+    source="$1"
+    destination="$2"
+    [ -f "$source" ] || return 0
+    destination_dir=${destination%/*}
+    [ -d "$destination_dir" ] || return 0
+    temporary="${destination}.package-new-$$"
+    rm -f "$temporary"
+    cp -f "$source" "$temporary" || return 1
+    chmod 755 "$temporary" || return 1
+    chown root:wheel "$temporary" 2>/dev/null || true
+    mv -f "$temporary" "$destination" || return 1
+    trust_installed_macho "$destination"
+}
+
+# /var/jb/usr/macOS is package storage; macOS processes actually load these
+# files from the mounted rootfs. Keep the two locations identical on every deb
+# install, using new inodes so AMFI cannot retain a stale vnode signature.
+# A missing System/Library sentinel means the rootfs is not mounted; never
+# create a shadow tree under the mount point in that state.
+if [ -d "$ROOTFS/System/Library" ]; then
+    # macos_gui.sh and macwsworkspacectl form a versioned startup contract.
+    # A 2026-08-07 cold start had the new all-pane launcher script beside the
+    # old single-pane binary; the latter printed its usage for
+    # `register-settings-extensions`, then every automatic retry repeated the
+    # complete LaunchServices scan.  Refuse that split package at install time
+    # instead of publishing a runtime which can only fail after boot.
+    if ! /var/jb/usr/bin/grep -aFq 'register-settings-extensions' \
+            /var/jb/usr/macOS/bin/macwsworkspacectl 2>/dev/null; then
+        echo 'ERROR: packaged macwsworkspacectl lacks the all-settings startup contract.' >&2
+        exit 1
+    fi
+    install_chroot_runtime "$LIBMACHOOK" \
+        "$ROOTFS/usr/local/lib/libmachook.dylib" || exit 1
+    install_chroot_runtime "$LIBMACHOOK_ARM64" \
+        "$ROOTFS/usr/local/lib/libmachook_arm64.dylib" || exit 1
+    for bridge in macwsinputd macwsdisplayd macwsinteropd macwsworkspacectl macws-neofetch; do
+        install_chroot_runtime "/var/jb/usr/macOS/bin/$bridge" \
+            "$ROOTFS/usr/local/bin/$bridge" || exit 1
+    done
+    # Steam's launchd job enters the chroot before invoking this script. Keep
+    # its source in package storage and publish one atomic rootfs copy so a
+    # reboot or package reinstall cannot depend on a historical /tmp file.
+    install_chroot_runtime "/var/jb/usr/macOS/bin/run_steam_live.sh" \
+        "$ROOTFS/usr/local/bin/macws-run-steam.sh" || exit 1
+    # Wallpaper is package data, not executable runtime. Publish it with an
+    # atomic inode replacement so a cold rootfs never observes a partial PNG.
+    # Unlike install_chroot_runtime it deliberately needs neither signing nor
+    # trustcache registration.
+    if [ -f "$WORKSPACE_WALLPAPER_SOURCE" ]; then
+        wallpaper_directory=${WORKSPACE_WALLPAPER_TARGET%/*}
+        wallpaper_temporary="${WORKSPACE_WALLPAPER_TARGET}.package-new-$$"
+        mkdir -p "$wallpaper_directory" || exit 1
+        rm -f "$wallpaper_temporary"
+        cp -f "$WORKSPACE_WALLPAPER_SOURCE" "$wallpaper_temporary" || exit 1
+        chmod 644 "$wallpaper_temporary" || exit 1
+        chown root:wheel "$wallpaper_temporary" 2>/dev/null || true
+        mv -f "$wallpaper_temporary" "$WORKSPACE_WALLPAPER_TARGET" || exit 1
+    fi
+    # These two libraries belong to different exact ANGLE revisions.  Publish
+    # both atomically during dpkg so a cold first launch never depends on the
+    # later interactive repair path.
+    mkdir -p "$ANGLE_ASSET_TARGET_DIR" || exit 1
+    for angle_asset_spec in \
+        'angle-default-1ba8ec3-macabi.metallib:714152' \
+        'angle-default-5d4df51-macabi.metallib:711592'; do
+        angle_asset=${angle_asset_spec%%:*}
+        angle_expected=${angle_asset_spec##*:}
+        angle_source="$ANGLE_ASSET_SOURCE_DIR/$angle_asset"
+        angle_target="$ANGLE_ASSET_TARGET_DIR/$angle_asset"
+        angle_temporary="$angle_target.package-new-$$"
+        if [ ! -f "$angle_source" ] ||
+           [ "$(wc -c < "$angle_source" 2>/dev/null)" != "$angle_expected" ]; then
+            echo "macOS Host install failed: invalid ANGLE asset $angle_source" >&2
+            exit 1
+        fi
+        rm -f "$angle_temporary"
+        cp -f "$angle_source" "$angle_temporary" || exit 1
+        chmod 0644 "$angle_temporary" || exit 1
+        chown root:wheel "$angle_temporary" 2>/dev/null || true
+        mv -f "$angle_temporary" "$angle_target" || exit 1
+    done
+    interop_bundle_source=/var/jb/usr/macOS/libexec/MacWSInteropService.app/Contents
+    interop_bundle_target="$ROOTFS/usr/local/libexec/MacWSInteropService.app/Contents"
+    if [ -f "$interop_bundle_source/MacOS/macwsinteropd" ]; then
+        mkdir -p "$interop_bundle_target/MacOS"
+        cp -f "$interop_bundle_source/Info.plist" \
+            "$interop_bundle_target/Info.plist" || exit 1
+        rm -f "$interop_bundle_target/MacOS/macwsinteropd"
+        cp -f "$interop_bundle_source/MacOS/macwsinteropd" \
+            "$interop_bundle_target/MacOS/macwsinteropd" || exit 1
+        chmod 644 "$interop_bundle_target/Info.plist"
+        chmod 755 "$interop_bundle_target/MacOS/macwsinteropd"
+		# CoreLocationAgent uses macOS Security's live-code validation, which
+		# rejects the ldid-only bundle even though AMFI accepts its CDHash.
+		# Re-seal the complete app with Ventura's native ad-hoc signer.  The
+		# operation is deterministic on the target and preserves the merged
+		# native/project entitlements plus identifier-only requirement.
+		MACWS_UTILITY_PROCESS=1 \
+		/var/jb/usr/macOS/bin/launchdchrootexec 0 0 "$ROOTFS" \
+			/usr/bin/codesign --force --sign - --timestamp=none \
+			--preserve-metadata=identifier,entitlements,requirements \
+			/usr/local/libexec/MacWSInteropService.app || exit 1
+		MACWS_UTILITY_PROCESS=1 \
+		/var/jb/usr/macOS/bin/launchdchrootexec 0 0 "$ROOTFS" \
+			/usr/bin/codesign --verify --strict --verbose=2 \
+			/usr/local/libexec/MacWSInteropService.app || exit 1
+		/var/jb/usr/bin/ldid -e \
+			"$interop_bundle_target/MacOS/macwsinteropd" 2>/dev/null |
+			grep -Fq '<key>com.apple.locationd.simulation</key>' || exit 1
+		/var/jb/usr/bin/ldid -h \
+			"$interop_bundle_target/MacOS/macwsinteropd" 2>/dev/null |
+			grep -Fqx 'Identifier=com.macwsguide.interopd' || exit 1
+        trust_installed_macho \
+            "$interop_bundle_target/MacOS/macwsinteropd"
+    fi
+    ensure_chroot_application_signature \
+        "$ROOTFS/System/Applications/System Settings.app/Contents/MacOS/System Settings" || exit 1
+    ensure_chroot_identifier_requirement_signature \
+        "$ROOTFS/System/Applications/Maps.app/Contents/MacOS/Maps" \
+        'com.apple.Maps' || exit 1
+    # Weather also needs its native private capabilities and a Catalyst scene
+    # manifest.  The focused helper removes only container-required, which is
+    # incompatible with the responsible-process carrier, before merging the
+    # common MacWS admission rights.
+    ensure_weather_signature || exit 1
+    install_sublime_software_renderer_default || exit 1
+    ensure_chroot_application_signature \
+        "$ROOTFS/System/Library/CoreServices/UIKitSystem.app/Contents/MacOS/UIKitSystem" || exit 1
+    ensure_chroot_application_signature \
+        "$ROOTFS/System/Library/PrivateFrameworks/ViewBridge.framework/Versions/A/XPCServices/ViewBridgeAuxiliary.xpc/Contents/MacOS/ViewBridgeAuxiliary" || exit 1
+    ensure_chroot_application_signature \
+        "$ROOTFS/System/Library/Frameworks/QuickLookUI.framework/Versions/A/XPCServices/QuickLookUIService.xpc/Contents/MacOS/QuickLookUIService" || exit 1
+    # QuickLookUIService dlopens the qldisplay implementation selected for the
+    # previewed type. Runtime oslog on 2026-09-08 showed its real Image and
+    # Generic bundle paths rejected as "missing compatible architecture"
+    # while both Mach-O headers contained arm64e; their exact CDHashes were
+    # absent from `jbctl trustcache info`, whereas the executing UI service's
+    # hash was present. Sign and admit the complete fixed system qldisplay set
+    # so Space preview does not regress when the selected UTI changes.
+    quicklook_display_root="$ROOTFS/System/Library/Frameworks/QuickLookUI.framework/Versions/A/PlugIns"
+    for quicklook_display_bundle in "$quicklook_display_root"/*.qldisplay; do
+        [ -d "$quicklook_display_bundle" ] || continue
+        quicklook_display_name=${quicklook_display_bundle##*/}
+        quicklook_display_name=${quicklook_display_name%.qldisplay}
+        quicklook_display_executable="$quicklook_display_bundle/Contents/MacOS/$quicklook_display_name"
+        [ ! -f "$quicklook_display_executable" ] || \
+            ensure_chroot_application_signature \
+                "$quicklook_display_executable" || exit 1
+    done
+    ensure_chroot_application_signature \
+        "$ROOTFS/System/Library/CoreServices/Dock.app/Contents/XPCServices/DockHelper.xpc/Contents/MacOS/DockHelper" || exit 1
+    ensure_chroot_application_signature \
+        "$ROOTFS/System/Library/CoreServices/sharedfilelistd" || exit 1
+    # The project launchservicesd executable is a thin loader. Its already-
+    # signed Ventura payload is dlopen'd before autosignd can run, so restore
+    # that dylib's reboot-volatile CDHash as part of the same package closure.
+    trust_installed_macho \
+        "$ROOTFS/System/Library/CoreServices/launchservicesd.dylib"
+    ensure_chroot_application_signature \
+        "$ROOTFS/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/CarbonCore.framework/Versions/A/XPCServices/csnameddatad.xpc/Contents/MacOS/csnameddatad" || exit 1
+    ensure_chroot_application_signature \
+        "$ROOTFS/System/Library/CoreServices/coreservicesd" || exit 1
+    ensure_chroot_extensionkit_signature \
+        "$ROOTFS/System/Library/Frameworks/ExtensionFoundation.framework/Versions/A/XPCServices/extensionkitservice.xpc/Contents/MacOS/extensionkitservice" || exit 1
+    ensure_chroot_appearance_signature \
+        "$ROOTFS/System/Library/ExtensionKit/Extensions/Appearance.appex/Contents/MacOS/Appearance" || exit 1
+    # Preserve Appearance's stock private capabilities first, then reconcile
+    # every Settings pane's bundle-local libmachook/Substrate/trampoline
+    # closure. Package upgrades normally change only those dependencies, so
+    # retain the already-verified pane executable, unique carrier identity and
+    # uicache registration. The transactional repair checks all of those
+    # invariants and publishes its aggregate marker only after all 48 panes
+    # converge. A first install or any malformed/missing identity falls back to
+    # the complete entitlement/carrier preparation path.
+    if ! bash /var/jb/usr/macOS/bin/ensure_settings_extensions_runtime.sh \
+            --repair-dependencies; then
+        echo '[INFO] Incremental Settings dependency repair unavailable; running complete preparation.'
+        bash /var/jb/usr/macOS/bin/ensure_settings_extensions_runtime.sh ||
+            exit 1
+    fi
+    # Keep the mandatory postcondition. A successful transactional repair can
+    # satisfy it from the exact boot/dependency marker; a full preparation runs
+    # the unchanged deep verifier here before installation is accepted.
+    bash /var/jb/usr/macOS/bin/ensure_settings_extensions_runtime.sh --verify || exit 1
+    ensure_chroot_native_service_signature \
+        "$ROOTFS/System/Library/CoreServices/CoreLocationAgent.app/Contents/MacOS/CoreLocationAgent" \
+        "$CORELOCATIONAGENT_NATIVE_ENTITLEMENTS" \
+        '<key>com.apple.locationd.authorizeapplications</key>' \
+        'com.apple.CoreLocationAgent' || exit 1
+    ensure_chroot_native_service_signature \
+        "$ROOTFS/usr/libexec/locationd" \
+        "$LOCATIOND_NATIVE_ENTITLEMENTS" \
+        '<key>com.apple.private.security.storage.locationd</key>' \
+        'com.apple.locationd' || exit 1
+    ensure_chroot_native_service_signature \
+        "$ROOTFS/System/Library/PrivateFrameworks/GeoServices.framework/Versions/A/XPCServices/com.apple.geod.xpc/Contents/MacOS/com.apple.geod" \
+        "$GEOD_NATIVE_ENTITLEMENTS" \
+        '<key>com.apple.private.network.socket-delegate</key>' \
+        'com.apple.geod' || exit 1
+    ensure_chroot_native_service_signature \
+        "$ROOTFS/usr/libexec/diskarbitrationd" \
+        "$DISKARBITRATIOND_NATIVE_ENTITLEMENTS" \
+        '<key>com.apple.private.security.disk-device-access</key>' \
+        'com.apple.diskarbitrationd' || exit 1
+    # cfprefsd is launched before autosignd can help.  Keep the stock image
+    # untouched and install a private copy with its proven minimal profile;
+    # the generic project profile's system-container entitlement is invalid in
+    # this chroot and causes an immediate sandbox kill.
+    ensure_private_cfprefsd || exit 1
+    # Shader compatibility artifacts are data, not trustcache state. A package
+    # upgrade can therefore leave every executable sentinel valid while an old
+    # secondary QuartzCore library remains installed. Provision and validate
+    # it here so the first GUI launch after dpkg is never the repair boundary.
+    bash /var/jb/usr/macOS/bin/ensure_metal2metal_compat.sh || exit 1
+    # A full package install runs this maintainer script directly; it does not
+    # run the separate deep postinst.sh. Establish the same interactive CLI
+    # invariant here after the package payload has been synchronized. The
+    # helper appends one managed block without replacing user shell settings.
+    bash /var/jb/usr/macOS/bin/configure_terminal_cli.sh "$ROOTFS" || exit 1
+    # Derived Metal caches must be upgraded at the actual package entry point,
+    # not only the optional deep repair script. Live clients defer safely;
+    # ordinary GUI startup retries before creating a new service generation.
+    /var/jb/usr/bin/python3 /var/jb/usr/macOS/bin/macws_metal_cache_migration.py \
+        --rootfs "$ROOTFS" --defer-if-running || exit 1
+    echo 'Synchronized package runtime into the mounted macOS rootfs.'
+else
+    echo 'macOS rootfs is not mounted; chroot runtime sync deferred.'
+fi
+
+# Running input/Dock receivers retain their existing executable mappings.
+# Publish package files now, but report their deferred activation instead of
+# interrupting a live user's session. Stopped GUI jobs must stay stopped.
+for managed_gui_job in input dock; do
+    /var/jb/usr/bin/python3 /var/jb/usr/macOS/bin/macws_refresh_managed_job.py \
+        "$managed_gui_job" || exit 1
+done
+
+if [ -f "$HOSTD_PLIST" ]; then
+    # Old hostd versions placed GUI children in their own launchd process
+    # group. Unloading that job can terminate unsaved Word/Terminal windows.
+    # Defer every loaded job, even if a snapshot currently shows no children:
+    # the old daemon could spawn a child between the check and an unload.
+    /var/jb/usr/bin/python3 /var/jb/usr/macOS/bin/macws_refresh_managed_job.py hostd || exit 1
+fi
+
+if [ -x /var/jb/usr/bin/uicache ]; then
+    /var/jb/usr/bin/uicache -p /var/jb/Applications/MacWSHost.app 2>/dev/null || true
+    if [ -x /var/jb/Applications/MacWSCatalystLauncher.app/MacWSCatalystLauncher ]; then
+        chown root:wheel \
+            /var/jb/Applications/MacWSCatalystLauncher.app/MacWSCatalystLauncher
+        chmod 4755 \
+            /var/jb/Applications/MacWSCatalystLauncher.app/MacWSCatalystLauncher
+        /var/jb/usr/bin/uicache -p \
+            /var/jb/Applications/MacWSCatalystLauncher.app 2>/dev/null || true
+    fi
+fi
+
+# Settings extensions are launched in the mobile user's RunningBoard domain.
+# The freestanding proxy must enter the chroot before dropping into the real
+# macOS extension image, so retain mobile as the real uid while giving only
+# this minimal first image a saved/effective root uid for chroot(2).
+if [ -x "$SETTINGS_EXTENSION_PROXY" ]; then
+    chown root:wheel "$SETTINGS_EXTENSION_PROXY"
+    chmod 4755 "$SETTINGS_EXTENSION_PROXY"
+    if [ -x /var/jb/usr/bin/uicache ]; then
+        /var/jb/usr/bin/uicache -p \
+            /var/jb/Applications/SettingsExtensionProxy.app \
+            2>/dev/null || true
+    fi
+fi
+
+# Replacing a resident tweak requires a SpringBoard restart, but package
+# installation must not silently discard the user's stage/windows. The live
+# service publishes its capabilities automatically at its next start; neither
+# cold boot nor Host startup needs an enabling marker file.
+windowing_ready() {
+    /var/jb/usr/macOS/bin/macws_control_probe windowing-status >/dev/null 2>&1
+}
+if ! windowing_ready; then
+    echo 'MacWSWindowing upgrade installed; its new protocol takes effect at the next user-initiated SpringBoard restart.'
+    echo 'No respring was performed.'
+fi
+
+# AppKit's ViewBridge, HIServices and open/save-panel helpers, plus
+# ExtensionKit's service, are born in a mobile-owned per-process XPC domain.
+# Every one uses the same freestanding first image and must execute chroot(2)
+# before libSystem consumes launchd's one-shot XPC context.  Runtime evidence
+# on 2026-08-04: ViewBridgeAuxiliary and ExtensionKitProxy in mode 0755 both
+# exited with main.c's exact chroot-failure status 111; the identical signed
+# images reached their real macOS targets after mode 4755.  Apply that
+# executable contract consistently instead of fixing individual consumers.
+for proxy in \
+    "$VIEWBRIDGE_PROXY" \
+    "$HISERVICES_PROXY" \
+    "$OPEN_SAVE_PANEL_PROXY" \
+    "$QUICKLOOK_UI_PROXY" \
+    "$DOCK_HELPER_PROXY" \
+    "$EXTENSIONKIT_PROXY" \
+    "$GEOD_PROXY" \
+    "$WRITE_CONFIG_PROXY" \
+    "$LOCATIOND_PROXY"; do
+    if [ -x "$proxy" ]; then
+        chown root:wheel "$proxy"
+        chmod 4755 "$proxy"
+    fi
+done
+
+echo 'MacWS Host installed. Open the app to initialize, repair, start, and control macOS.'

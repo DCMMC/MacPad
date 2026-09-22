@@ -1,0 +1,10 @@
+settings set target.memory-module-load-level minimal
+settings set target.process.stop-on-sharedlibrary-events true
+command script import misc/lldb_trace_pf550_init.py
+process handle -s false -n false -p false SIGSTOP
+script lldb_trace_pf550_init.wait_for_agx_and_install(lldb.debugger)
+settings set target.process.stop-on-sharedlibrary-events false
+process handle -s false -n false -p true SIGSEGV SIGBUS
+script lldb_trace_pf550_init.continue_until_return(lldb.debugger)
+register read x0 x19 x22 x23 lr pc
+thread backtrace

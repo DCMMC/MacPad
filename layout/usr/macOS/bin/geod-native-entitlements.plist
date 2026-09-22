@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.Maps.mapspushd.geod</key>
+	<true/>
+	<key>com.apple.application-identifier</key>
+	<string>com.apple.geod</string>
+	<key>com.apple.locationd.effective_bundle</key>
+	<true/>
+	<key>com.apple.private.accounts.allaccounts</key>
+	<true/>
+	<key>com.apple.private.assets.accessible-asset-types</key>
+	<array>
+		<string>com.apple.MobileAsset.GeoPolygonDataAssets</string>
+	</array>
+	<key>com.apple.private.network.delegation-whitelist</key>
+	<true/>
+	<key>com.apple.private.network.socket-delegate</key>
+	<true/>
+	<key>com.apple.private.security.storage.locationd</key>
+	<true/>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.exception.files.absolute-path.read-only</key>
+	<array>
+		<string>/System/Library/Preferences/Logging</string>
+		<string>/AppleInternal/Library/Preferences/Logging</string>
+		<string>/Library/Preferences/Logging</string>
+	</array>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.temporary-exception.files.absolute-path.read-write</key>
+	<array>
+		<string>/Library/Caches/com.apple.DiagnosticReporting.HasBeenAppleInternal</string>
+		<string>/private/var/db/mds/system/mds.lock</string>
+	</array>
+	<key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
+	<array>
+		<string>/Library/com.apple.geod/</string>
+		<string>/Library/Caches/</string>
+		<string>/Library/Caches/GeoServices/</string>
+		<string>/Library/Caches/com.apple.geod/</string>
+		<string>/Library/Caches/MapTiles/</string>
+		<string>/Library/Application Support/CallHistoryDB/</string>
+	</array>
+	<key>com.apple.security.temporary-exception.mach-lookup.global-name</key>
+	<array>
+		<string>com.apple.Maps.mapspushd.geoservices</string>
+		<string>com.apple.CallHistorySyncHelper</string>
+		<string>com.apple.CrashReporterSupportHelper</string>
+		<string>com.apple.locationd.desktop.synchronous</string>
+		<string>com.apple.timed.xpc</string>
+	</array>
+	<key>com.apple.security.temporary-exception.shared-preference.read-write</key>
+	<array>
+		<string>com.apple.GEO</string>
+	</array>
+	<key>com.apple.timed</key>
+	<true/>
+</dict>
+</plist>

@@ -1,0 +1,6 @@
+command script import misc/lldb_trace_asphalt_drawable.py
+script lldb_trace_asphalt_drawable.install(lldb.debugger)
+process continue
+script lldb_trace_asphalt_drawable.summary()
+process detach
+quit

@@ -1,0 +1,10 @@
+# Current-boot iOS IOGPUMetalCommandBuffer private reserve IMP.  The clear
+# path calls this superclass method directly rather than the AGX family
+# override above it.
+breakpoint set --address 0x203adaf64
+continue
+register read x0 x1 x2 x19 x20 x21 x29 x30 pc
+thread backtrace -c 40
+disassemble --start-address '$lr-0x60' --count 96
+detach
+quit

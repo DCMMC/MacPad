@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Supplemental iPadOS audio-driver access for the macOS CoreAudio daemon.
+      ldid applies this file with -M so the daemon keeps its original macOS
+      CoreAudio/DriverKit entitlements.  mediaserverd on the target iPad uses
+      these same two permissions when opening AppleIPCAudioDeviceUserClient.
+    -->
+    <key>com.apple.private.audio.hal.aop-audio.user-access</key>
+    <true/>
+    <key>com.apple.security.exception.iokit-user-client-class</key>
+    <array>
+        <string>SCodecUserClient</string>
+        <string>AppleIPCAudioDeviceUserClient</string>
+        <string>AppleMSGKextUserClient</string>
+        <string>AppleMSGKextEPICUserClient</string>
+    </array>
+    <!-- Ventura's HAL opens the published IOAudio2 child class directly,
+         whereas iPadOS mediaserverd opens its AppleIPCAudio provider. -->
+    <key>com.apple.security.iokit-user-client-class</key>
+    <array>
+        <string>AppleIPCAudioDeviceUserClient</string>
+        <string>IOAudio2DeviceUserClient</string>
+    </array>
+</dict>
+</plist>

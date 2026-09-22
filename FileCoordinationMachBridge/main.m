@@ -1,0 +1,5 @@
+#define MACWS_RELAY_PUBLIC_SERVICE "com.apple.FileCoordination"
+#define MACWS_RELAY_PRIVATE_SERVICE "com.apple.macosbooter.FileCoordination"
+#define MACWS_RELAY_LOG_PATH "/var/jb/var/mobile/filecoordination-bridge.log"
+#define MACWS_RELAY_LOG_NAME "FileCoordinationBridge"
+#include "../FileCoordinationChrootProxy/Relay.inc"

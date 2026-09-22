@@ -1,0 +1,15 @@
+# Stop where macOS IOGPU reserves the large subtype-1 kernel-command record.
+#
+# The absolute address is runtime-confirmed for the current iOS boot from the
+# diagnostic ObjC method map:
+#   AGXMetal13_3 runtime base 0x1f7415000
+#   -[AGXG13GFamilyCommandBuffer reserveKernelCommandBufferSpace:] +0x22e788
+# Shared-cache mappings use one slide across processes during a boot.  Re-run
+# MACWS_AGX_DUMP_METHODS and update this address after an iPad reboot.
+breakpoint set --address 0x1f7643788
+continue
+register read x0 x1 x2 x29 x30 pc
+thread backtrace -c 30
+disassemble --start-address '$pc-0x10' --count 20
+detach
+quit

@@ -1,0 +1,15 @@
+settings set target.memory-module-load-level minimal
+settings set target.process.stop-on-sharedlibrary-events true
+command script import misc/lldb_trace_pf550_updatebind.py
+process handle -s false -n false -p false SIGSTOP
+script lldb_trace_pf550_updatebind.wait_for_agx_and_install_five(lldb.debugger)
+settings set target.process.stop-on-sharedlibrary-events false
+process handle -s false -n false -p true SIGSEGV SIGBUS
+script lldb_trace_pf550_updatebind.continue_until_target(lldb.debugger)
+register read x0 x1 x2 x3 x4 x5 x6 lr pc
+script lldb_trace_pf550_updatebind.dump_helper_inputs(lldb.debugger)
+script lldb_trace_pf550_updatebind.arm_helper_path(lldb.debugger)
+script lldb_trace_pf550_updatebind.arm_helper_return(lldb.debugger)
+continue
+register read x0 x8 x9 x19 x20 x21 x22 x23 x24 lr pc
+script lldb_trace_pf550_updatebind.dump_helper_return(lldb.debugger)

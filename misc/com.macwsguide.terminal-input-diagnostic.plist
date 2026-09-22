@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.macwsguide.terminal-input-diagnostic</string>
+    <key>POSIXSpawnType</key>
+    <string>Interactive</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/jb/usr/macOS/bin/launchdchrootexec</string>
+        <string>0</string>
+        <string>0</string>
+        <string>/var/mnt/rootfs</string>
+        <string>/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CA_VSYNC_OFF</key>
+        <string>1</string>
+        <key>MACWS_APP_DISPLAY_SETTLE_MS</key>
+        <string>750</string>
+        <key>MACWS_RUNTIME_DIAGNOSTICS</key>
+        <string>1</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/var/jb/var/mobile/terminal-input-diagnostic.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/jb/var/mobile/terminal-input-diagnostic.log</string>
+</dict>
+</plist>

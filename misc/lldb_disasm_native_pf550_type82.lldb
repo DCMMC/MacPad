@@ -1,0 +1,20 @@
+settings set target.process.stop-on-sharedlibrary-events false
+command script import misc/lldb_trace_iosclear_iogpu.py
+script lldb_trace_iosclear_iogpu.enable_compressed_type82_stop()
+script lldb_trace_iosclear_iogpu.install(lldb.debugger)
+continue
+register read x0 x1 x2 x3 x4 x5
+memory read --format x --size 8 --count 12 $x4
+thread backtrace
+script p=lldb.debugger.GetSelectedTarget().GetProcess(); e=lldb.SBError(); a=p.ReadPointerFromMemory(0x228fb49c8,e); print("IOGPU selector-stub 0x208086b40 slot=0x228fb49c8 selector=%#x name=%r error=%s" % (a, p.ReadCStringFromMemory(a, 256, e), e))
+script p=lldb.debugger.GetSelectedTarget().GetProcess(); e=lldb.SBError(); a=p.ReadPointerFromMemory(0x22a1a02b8,e); print("AGX selector-stub 0x226343f80 slot=0x22a1a02b8 selector=%#x name=%r error=%s" % (a, p.ReadCStringFromMemory(a, 256, e), e))
+frame select 3
+register read x25
+expression -l objc -O -- (const char *)object_getClassName((id)$x25)
+expression -l objc -- (void *)[(id)$x25 methodForSelector:@selector(initNewTextureData:)]
+disassemble --start-address $0 --count 420
+frame select 0
+disassemble --start-address 0x208057f80 --end-address 0x208058500
+disassemble --start-address 0x208086400 --end-address 0x208086440
+disassemble --start-address 0x2262f1300 --end-address 0x2262f1700
+disassemble --start-address 0x226343e00 --end-address 0x226344200

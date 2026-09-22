@@ -1,0 +1,5 @@
+settings set stop-disassembly-count 0
+thread list
+thread backtrace all -c 18
+process detach
+quit

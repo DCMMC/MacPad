@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>CA_DISABLE_SWAP_ICC</key>
+		<string>1</string>
+		<key>CA_VSYNC_OFF</key>
+		<string>1</string>
+		<key>MACWS_AGX_NATIVE</key>
+		<string>1</string>
+		<key>MACWS_AGX_REGISTER_CLASSES</key>
+		<string>1</string>
+	</dict>
+	<key>Label</key>
+	<!-- iOS launchd's Daemon jetsam class is EnergyEfficiencyMode=Efficient
+	     on this device and pins the whole WindowServer thread group to E cores.
+	     A UIKitApplication label selects launchd's non-efficient App class;
+	     the actual WindowServer bootstrap identity remains its MachServices. -->
+	<string>UIKitApplication:com.macwsguide.windowserver</string>
+	<key>MachServices</key>
+	<dict>
+		<key>com.apple.CARenderServer</key>
+		<dict>
+			<key>HideUntilCheckIn</key>
+			<true/>
+		</dict>
+		<key>com.apple.CoreDisplay.Notification</key>
+		<dict>
+			<key>HideUntilCheckIn</key>
+			<true/>
+			<key>ResetAtClose</key>
+			<true/>
+		</dict>
+		<key>com.apple.CoreDisplay.master</key>
+		<dict>
+			<key>HideUntilCheckIn</key>
+			<true/>
+		</dict>
+		<key>com.apple.VirtualDisplay</key>
+		<dict>
+			<key>HideUntilCheckIn</key>
+			<true/>
+		</dict>
+		<key>com.apple.iohideventsystem</key>
+		<dict>
+			<key>ResetAtClose</key>
+			<true/>
+		</dict>
+		<key>com.apple.macosbooter.CARenderServer</key>
+		<dict>
+			<key>HideUntilCheckIn</key>
+			<true/>
+		</dict>
+		<key>com.apple.windowserver</key>
+		<true/>
+		<key>com.apple.windowserver.active</key>
+		<dict>
+			<key>HideUntilCheckIn</key>
+			<true/>
+		</dict>
+		<key>com.apple.windowserver.watchdog</key>
+		<dict>
+			<key>HideUntilCheckIn</key>
+			<true/>
+		</dict>
+		<!-- displayd is independently restartable. WindowServer owns this
+		     request port so a new receiver can ask for a fresh snapshot of the
+		     latest completed native composite instead of falling back to a
+		     per-window reconstruction that cannot preserve backdrop materials. -->
+		<key>com.macwsguide.windowserver.final-composite-replay</key>
+		<true/>
+	</dict>
+	<key>POSIXSpawnType</key>
+	<string>Interactive</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/var/jb/usr/macOS/bin/launchdchrootexec</string>
+		<string>0</string>
+		<string>0</string>
+		<string>/var/mnt/rootfs</string>
+		<string>/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer</string>
+		<string>-virtualonly</string>
+		<string>-daemon</string>
+	</array>
+	<key>StandardErrorPath</key>
+	<string>/var/jb/var/mobile/WindowServer.err</string>
+	<key>StandardOutPath</key>
+	<string>/var/jb/var/mobile/WindowServer.out</string>
+</dict>
+</plist>
