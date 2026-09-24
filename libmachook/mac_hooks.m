@@ -10645,6 +10645,70 @@ static bool macws_amfi_immovable_task_port_compat(
     return true;
 }
 
+static int macws_hex_nibble(char value) {
+    if (value >= '0' && value <= '9') return value - '0';
+    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+    return -1;
+}
+
+static bool macws_rosetta_amfi_public_key_hash_compat(
+        const char *policy, int operation, void *argument, int originalResult,
+        int originalErrno) {
+    // Ventura 13.4 oahd+0x24fc passes a two-word output descriptor to
+    // __sandbox_ms("AMFI", 0x5c, ...): { uint8_t *bytes, size_t length }.
+    // Its caller at oahd+0x4fa0 requests exactly 32 bytes and refuses to
+    // register com.apple.oahd when the policy call fails.  iPadOS 16.0
+    // runtime-confirmed the otherwise identical call returns ENOSYS without
+    // touching either the descriptor or its output buffer.
+    //
+    // Keep this adapter diagnostic and explicit: the value must be the real
+    // 32-byte result captured from __sandbox_ms on a macOS host.  It is used
+    // only after the iPadOS policy reports ENOSYS, only by oahd, and only for
+    // this exact operation.  This does not claim that iPadOS implements the
+    // downstream Rosetta exec/AOT kernel contracts.
+    const char *hex = getenv("MACWS_ROSETTA_AMFI_PUBLIC_KEY_HASH");
+    const char *program = getprogname();
+    if (!hex || !program || strcmp(program, "oahd") != 0 || !policy ||
+        strcmp(policy, "AMFI") != 0 || operation != 0x5c || !argument ||
+        originalResult != -1 || originalErrno != ENOSYS ||
+        strlen(hex) != CC_SHA256_DIGEST_LENGTH * 2)
+        return false;
+
+    struct MacWSSandboxBuffer {
+        void *bytes;
+        size_t length;
+    };
+    struct MacWSSandboxBuffer *output = argument;
+    if (!output->bytes || output->length != CC_SHA256_DIGEST_LENGTH)
+        return false;
+
+    uint8_t decoded[CC_SHA256_DIGEST_LENGTH];
+    for (size_t index = 0; index < sizeof(decoded); ++index) {
+        int high = macws_hex_nibble(hex[index * 2]);
+        int low = macws_hex_nibble(hex[index * 2 + 1]);
+        if (high < 0 || low < 0) {
+            static _Atomic bool invalidLogged = false;
+            if (!atomic_exchange_explicit(&invalidLogged, true,
+                                          memory_order_relaxed)) {
+                fprintf(stderr,
+                    "#### ROSETTA-AMFI-HASH-COMPAT invalid 64-hex value\n");
+            }
+            return false;
+        }
+        decoded[index] = (uint8_t)((high << 4) | low);
+    }
+    memcpy(output->bytes, decoded, sizeof(decoded));
+    errno = 0;
+    static _Atomic bool logged = false;
+    if (!atomic_exchange_explicit(&logged, true, memory_order_relaxed)) {
+        fprintf(stderr,
+            "#### ROSETTA-AMFI-HASH-COMPAT policy=AMFI op=0x5c "
+            "source=MACWS_ROSETTA_AMFI_PUBLIC_KEY_HASH bytes=32\n");
+    }
+    return true;
+}
+
 int __mac_syscall_new(const char *policy, int operation, void *argument) {
     if (macws_amfi_immovable_task_port_compat(
             "__mac_syscall", policy, operation, argument))
@@ -10657,7 +10721,13 @@ int macws_sandbox_ms(const char *policy, int operation, void *argument) {
     if (macws_amfi_immovable_task_port_compat(
             "__sandbox_ms", policy, operation, argument))
         return 0;
-    return __sandbox_ms(policy, operation, argument);
+    int result = __sandbox_ms(policy, operation, argument);
+    int savedErrno = errno;
+    if (macws_rosetta_amfi_public_key_hash_compat(
+            policy, operation, argument, result, savedErrno))
+        return 0;
+    errno = savedErrno;
+    return result;
 }
 
 int csr_get_active_config_new(uint32_t *configuration) {
