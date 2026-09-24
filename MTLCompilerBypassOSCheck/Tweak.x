@@ -966,9 +966,28 @@ static uintptr_t MacWSMTLCodeGenServiceBuildRequest(
 }
 
 static void InstallMacOSMetalTargetAdapter(void) {
-    static const uint8_t expectedUUID[16] = {
-        0x6d, 0x2c, 0xfe, 0x56, 0x8d, 0x88, 0x39, 0xaa,
-        0xbc, 0x25, 0x7f, 0xfe, 0x50, 0x58, 0xed, 0x4e,
+    // RE-confirmed from the complete executables, not inferred from the OS
+    // version.  Both images have the same three authenticated build-call
+    // sites and the same reply call:
+    //
+    //   iOS 16.3.1 (20D67) UUID 6D2CFE56-8D88-39AA-BC25-7FFE5058ED4E
+    //   iOS 16.0   (20A8372) UUID B4745394-88D0-3739-9E17-4DE2FB12B00E
+    //
+    // The 20A8372 executable has SHA-256
+    // 2f980bfb46e3d97c5a330f54c158b41de21793ec113f3d33891e3599e75faba5;
+    // otool disassembly confirms +0x20e8 is `blraaz x9`, +0x25f0 and
+    // +0x2628 are `blraaz x8`, and +0x2770 is the same xpc_data_create BL.
+    // Keep an exact UUID allowlist in addition to the per-instruction checks
+    // below so an unexamined service build always retains stock behavior.
+    static const uint8_t expectedUUIDs[][16] = {
+        {
+            0x6d, 0x2c, 0xfe, 0x56, 0x8d, 0x88, 0x39, 0xaa,
+            0xbc, 0x25, 0x7f, 0xfe, 0x50, 0x58, 0xed, 0x4e,
+        },
+        {
+            0xb4, 0x74, 0x53, 0x94, 0x88, 0xd0, 0x37, 0x39,
+            0x9e, 0x17, 0x4d, 0xe2, 0xfb, 0x12, 0xb0, 0x0e,
+        },
     };
     const struct mach_header_64 *mh = NULL;
     uint32_t imageCount = _dyld_image_count();
@@ -988,16 +1007,32 @@ static void InstallMacOSMetalTargetAdapter(void) {
     const struct load_command *lc =
         (const struct load_command *)((const uint8_t *)mh + sizeof(*mh));
     bool uuidMatches = false;
+    uint8_t actualUUID[16] = {0};
     for (uint32_t i = 0; i < mh->ncmds; i++) {
         if (lc->cmd == LC_UUID) {
             const struct uuid_command *uc = (const struct uuid_command *)lc;
-            uuidMatches = memcmp(uc->uuid, expectedUUID, 16) == 0;
+            memcpy(actualUUID, uc->uuid, sizeof(actualUUID));
+            for (size_t candidate = 0;
+                 candidate < sizeof(expectedUUIDs) / sizeof(expectedUUIDs[0]);
+                 candidate++) {
+                if (memcmp(actualUUID, expectedUUIDs[candidate],
+                           sizeof(actualUUID)) == 0) {
+                    uuidMatches = true;
+                    break;
+                }
+            }
             break;
         }
         lc = (const struct load_command *)((const uint8_t *)lc + lc->cmdsize);
     }
     if (!uuidMatches) {
-        MTLPatchLog("target adapter: MTLCompilerService UUID mismatch");
+        MTLPatchLog("target adapter: MTLCompilerService UUID mismatch "
+                    "%02x%02x%02x%02x-%02x%02x-%02x%02x-"
+                    "%02x%02x-%02x%02x%02x%02x%02x%02x",
+                    actualUUID[0], actualUUID[1], actualUUID[2], actualUUID[3],
+                    actualUUID[4], actualUUID[5], actualUUID[6], actualUUID[7],
+                    actualUUID[8], actualUUID[9], actualUUID[10], actualUUID[11],
+                    actualUUID[12], actualUUID[13], actualUUID[14], actualUUID[15]);
         return;
     }
 
