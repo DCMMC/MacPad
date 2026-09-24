@@ -433,8 +433,20 @@ typedef struct {
     size_t size;
 } MacWSJITRange;
 
-static MacWSJITRange g_macws_jit_ranges[32];
+// A MAP_JIT reservation is not necessarily executable in full. Unity Mono,
+// for example, reserves PROT_NONE|MAP_JIT arenas and later gives individual
+// pages either RW data protection or RWX code protection. Keep reservations
+// for recognizing later mprotect calls, but flip only the subranges whose
+// requested protection actually includes execute. Treating the full arena as
+// code turns Mono's hazard-pointer data pages RX when a write scope closes.
+#define MACWS_JIT_RESERVATION_CAPACITY 32u
+#define MACWS_JIT_EXEC_RANGE_CAPACITY 1024u
+static MacWSJITRange
+    g_macws_jit_ranges[MACWS_JIT_RESERVATION_CAPACITY];
 static _Atomic unsigned g_macws_jit_range_count = 0;
+static MacWSJITRange
+    g_macws_jit_exec_ranges[MACWS_JIT_EXEC_RANGE_CAPACITY];
+static _Atomic unsigned g_macws_jit_exec_range_count = 0;
 static pthread_mutex_t g_macws_jit_state_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic unsigned g_macws_jit_active_writers = 0;
 static _Thread_local bool g_macws_jit_thread_writable = false;
@@ -450,6 +462,23 @@ static _Atomic bool g_macws_jit_needs_initial_rx = false;
 static pthread_mutex_t g_macws_jit_handler_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct sigaction g_macws_jit_downstream_sigbus;
 static bool g_macws_jit_downstream_sigbus_valid = false;
+static _Atomic int g_macws_jit_forward_record_fd = -1;
+
+typedef struct {
+    uint64_t magic;
+    uint32_t version;
+    int32_t signo;
+    int32_t signal_code;
+    uint32_t thread_writable;
+    uint64_t program_counter;
+    uint64_t fault_address;
+    uint32_t reservation_count;
+    uint32_t executable_range_count;
+    uint32_t active_writers;
+    uint32_t write_faults;
+    uint32_t dirty_pages;
+    uint32_t reserved;
+} MacWSJITForwardRecord;
 
 // V8 reserves one 256-MiB arm64 CodeRange (16,384 pages on this device).  A
 // writer scope normally touches only a handful of those pages.  Keep enough
@@ -504,7 +533,129 @@ static bool macws_jit_range_overlaps(uintptr_t base, size_t size) {
     return overlaps;
 }
 
-static void macws_jit_record_range(void *address, size_t size) {
+static void macws_jit_add_exec_range_locked(uintptr_t base, size_t size) {
+    if (size == 0 || base > UINTPTR_MAX - size) return;
+    uintptr_t end = base + size;
+    unsigned count = atomic_load_explicit(&g_macws_jit_exec_range_count,
+                                           memory_order_relaxed);
+
+    for (unsigned i = 0; i < count;) {
+        uintptr_t range_base = g_macws_jit_exec_ranges[i].base;
+        size_t range_size = g_macws_jit_exec_ranges[i].size;
+        if (range_size == 0 || range_base > UINTPTR_MAX - range_size) {
+            i++;
+            continue;
+        }
+        uintptr_t range_end = range_base + range_size;
+        if (end < range_base || range_end < base) {
+            i++;
+            continue;
+        }
+        if (range_base < base) base = range_base;
+        if (range_end > end) end = range_end;
+        memmove(&g_macws_jit_exec_ranges[i],
+                &g_macws_jit_exec_ranges[i + 1],
+                (count - i - 1) * sizeof(g_macws_jit_exec_ranges[0]));
+        count--;
+    }
+
+    if (count >= MACWS_JIT_EXEC_RANGE_CAPACITY) {
+        fprintf(stderr,
+                "#### JIT-MPROTECT executable-range table FULL "
+                "base=%p size=%#zx\n",
+                (void *)base, (size_t)(end - base));
+        atomic_store_explicit(&g_macws_jit_exec_range_count, count,
+                              memory_order_release);
+        return;
+    }
+    g_macws_jit_exec_ranges[count].base = base;
+    g_macws_jit_exec_ranges[count].size = end - base;
+    atomic_store_explicit(&g_macws_jit_exec_range_count, count + 1,
+                          memory_order_release);
+    atomic_store_explicit(&g_macws_jit_needs_initial_rx, true,
+                          memory_order_release);
+}
+
+static unsigned macws_jit_remove_table_range_locked(
+    MacWSJITRange *ranges, unsigned count, unsigned capacity,
+    uintptr_t removed_base, uintptr_t removed_end) {
+    for (unsigned i = 0; i < count;) {
+        uintptr_t range_base = ranges[i].base;
+        size_t range_size = ranges[i].size;
+        if (range_size == 0 || range_base > UINTPTR_MAX - range_size) {
+            i++;
+            continue;
+        }
+        uintptr_t range_end = range_base + range_size;
+        if (removed_base >= range_end || range_base >= removed_end) {
+            i++;
+            continue;
+        }
+
+        if (removed_base <= range_base && removed_end >= range_end) {
+            memmove(&ranges[i], &ranges[i + 1],
+                    (count - i - 1) * sizeof(ranges[0]));
+            count--;
+            continue;
+        }
+        if (removed_base <= range_base) {
+            ranges[i].base = removed_end;
+            ranges[i].size = range_end - removed_end;
+            i++;
+            continue;
+        }
+        if (removed_end >= range_end) {
+            ranges[i].size = removed_base - range_base;
+            i++;
+            continue;
+        }
+
+        if (count < capacity) {
+            memmove(&ranges[i + 2], &ranges[i + 1],
+                    (count - i - 1) * sizeof(ranges[0]));
+            ranges[i].size = removed_base - range_base;
+            ranges[i + 1].base = removed_end;
+            ranges[i + 1].size = range_end - removed_end;
+            count++;
+            i += 2;
+        } else {
+            size_t left_size = removed_base - range_base;
+            size_t right_size = range_end - removed_end;
+            if (right_size > left_size) {
+                ranges[i].base = removed_end;
+                ranges[i].size = right_size;
+            } else {
+                ranges[i].size = left_size;
+            }
+            i++;
+        }
+    }
+    return count;
+}
+
+static void macws_jit_update_exec_range(void *address, size_t size,
+                                        int protection) {
+    if (!address || size == 0 ||
+        (uintptr_t)address > UINTPTR_MAX - size) return;
+    uintptr_t base = (uintptr_t)address;
+    uintptr_t end = base + size;
+    pthread_mutex_lock(&g_macws_jit_state_lock);
+    if ((protection & PROT_EXEC) != 0) {
+        macws_jit_add_exec_range_locked(base, size);
+    } else {
+        unsigned count = atomic_load_explicit(
+            &g_macws_jit_exec_range_count, memory_order_relaxed);
+        count = macws_jit_remove_table_range_locked(
+            g_macws_jit_exec_ranges, count,
+            MACWS_JIT_EXEC_RANGE_CAPACITY, base, end);
+        atomic_store_explicit(&g_macws_jit_exec_range_count, count,
+                              memory_order_release);
+    }
+    pthread_mutex_unlock(&g_macws_jit_state_lock);
+}
+
+static void macws_jit_record_range(void *address, size_t size,
+                                   int protection) {
     if (!address || address == MAP_FAILED || size == 0) return;
     // The SIGBUS handler must never perform its first getenv/cache setup.
     (void)macws_jit_fault_write_compat_enabled();
@@ -513,8 +664,23 @@ static void macws_jit_record_range(void *address, size_t size) {
         atomic_store_explicit(&g_macws_jit_page_size, (size_t)getpagesize(),
                               memory_order_release);
     }
-    atomic_store_explicit(&g_macws_jit_needs_initial_rx, true,
-                          memory_order_release);
+    // The signal handler cannot format diagnostics or open files safely.
+    // Pre-open a fixed-size binary flight recorder on the ordinary mmap path;
+    // the forwarded-fault path below performs only an async-signal-safe write.
+    if (macws_jit_trace_enabled() &&
+        atomic_load_explicit(&g_macws_jit_forward_record_fd,
+                             memory_order_acquire) < 0) {
+        int fd = open("/tmp/macws_jit_forwarded.bin",
+                      O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd >= 0) {
+            int expected = -1;
+            if (!atomic_compare_exchange_strong_explicit(
+                    &g_macws_jit_forward_record_fd, &expected, fd,
+                    memory_order_release, memory_order_relaxed)) {
+                close(fd);
+            }
+        }
+    }
     pthread_mutex_lock(&g_macws_jit_state_lock);
     unsigned count = atomic_load_explicit(&g_macws_jit_range_count,
                                            memory_order_relaxed);
@@ -523,11 +689,15 @@ static void macws_jit_record_range(void *address, size_t size) {
         g_macws_jit_ranges[count].size = size;
         atomic_store_explicit(&g_macws_jit_range_count, count + 1,
                               memory_order_release);
+        if ((protection & PROT_EXEC) != 0) {
+            macws_jit_add_exec_range_locked((uintptr_t)address, size);
+        }
         if (macws_jit_trace_enabled()) {
             fprintf(stderr,
                 "#### JIT-MPROTECT range[%u]=[%p,%p) "
-                "source=MAP_JIT-EINVAL\n",
-                count, address, (void *)((uintptr_t)address + size));
+                "source=MAP_JIT-EINVAL initial-prot=%#x executable=%d\n",
+                count, address, (void *)((uintptr_t)address + size),
+                protection, (protection & PROT_EXEC) != 0);
         }
     }
     pthread_mutex_unlock(&g_macws_jit_state_lock);
@@ -542,75 +712,30 @@ static void macws_jit_remove_range(void *address, size_t size) {
     pthread_mutex_lock(&g_macws_jit_state_lock);
     unsigned count = atomic_load_explicit(&g_macws_jit_range_count,
                                            memory_order_relaxed);
-    for (unsigned i = 0; i < count;) {
-        uintptr_t range_base = g_macws_jit_ranges[i].base;
-        size_t range_size = g_macws_jit_ranges[i].size;
-        uintptr_t range_end = range_base + range_size;
-        if (range_size == 0 || removed_base >= range_end ||
-            range_base >= removed_end) {
-            i++;
-            continue;
-        }
-
-        if (removed_base <= range_base && removed_end >= range_end) {
-            memmove(&g_macws_jit_ranges[i], &g_macws_jit_ranges[i + 1],
-                    (count - i - 1) * sizeof(g_macws_jit_ranges[0]));
-            count--;
-            continue;
-        }
-        if (removed_base <= range_base) {
-            g_macws_jit_ranges[i].base = removed_end;
-            g_macws_jit_ranges[i].size = range_end - removed_end;
-            i++;
-            continue;
-        }
-        if (removed_end >= range_end) {
-            g_macws_jit_ranges[i].size = removed_base - range_base;
-            i++;
-            continue;
-        }
-
-        // A middle slice was unmapped.  Preserve both live pieces when the
-        // fixed table has room; this path is not expected for V8 CodeRange,
-        // whose reservation and release are both page-aligned whole ranges.
-        if (count < sizeof(g_macws_jit_ranges) /
-                        sizeof(g_macws_jit_ranges[0])) {
-            memmove(&g_macws_jit_ranges[i + 2],
-                    &g_macws_jit_ranges[i + 1],
-                    (count - i - 1) * sizeof(g_macws_jit_ranges[0]));
-            g_macws_jit_ranges[i].size = removed_base - range_base;
-            g_macws_jit_ranges[i + 1].base = removed_end;
-            g_macws_jit_ranges[i + 1].size = range_end - removed_end;
-            count++;
-            i += 2;
-        } else {
-            // Retain the larger live side rather than tracking an unmapped
-            // hole that a future unrelated allocation could reuse.
-            size_t left_size = removed_base - range_base;
-            size_t right_size = range_end - removed_end;
-            if (right_size > left_size) {
-                g_macws_jit_ranges[i].base = removed_end;
-                g_macws_jit_ranges[i].size = right_size;
-            } else {
-                g_macws_jit_ranges[i].size = left_size;
-            }
-            i++;
-        }
-    }
+    count = macws_jit_remove_table_range_locked(
+        g_macws_jit_ranges, count, MACWS_JIT_RESERVATION_CAPACITY,
+        removed_base, removed_end);
     atomic_store_explicit(&g_macws_jit_range_count, count,
+                          memory_order_release);
+    unsigned exec_count = atomic_load_explicit(
+        &g_macws_jit_exec_range_count, memory_order_relaxed);
+    exec_count = macws_jit_remove_table_range_locked(
+        g_macws_jit_exec_ranges, exec_count,
+        MACWS_JIT_EXEC_RANGE_CAPACITY, removed_base, removed_end);
+    atomic_store_explicit(&g_macws_jit_exec_range_count, exec_count,
                           memory_order_release);
     pthread_mutex_unlock(&g_macws_jit_state_lock);
 }
 
 static bool macws_jit_pc_in_recorded_range(uintptr_t pc) {
-    unsigned count = atomic_load_explicit(&g_macws_jit_range_count,
+    unsigned count = atomic_load_explicit(&g_macws_jit_exec_range_count,
                                            memory_order_acquire);
-    if (count > sizeof(g_macws_jit_ranges) / sizeof(g_macws_jit_ranges[0])) {
-        count = sizeof(g_macws_jit_ranges) / sizeof(g_macws_jit_ranges[0]);
+    if (count > MACWS_JIT_EXEC_RANGE_CAPACITY) {
+        count = MACWS_JIT_EXEC_RANGE_CAPACITY;
     }
     for (unsigned i = 0; i < count; i++) {
-        uintptr_t base = g_macws_jit_ranges[i].base;
-        size_t size = g_macws_jit_ranges[i].size;
+        uintptr_t base = g_macws_jit_exec_ranges[i].base;
+        size_t size = g_macws_jit_exec_ranges[i].size;
         if (size && base <= pc && pc - base < size) return true;
     }
     return false;
@@ -784,6 +909,30 @@ static void macws_jit_exec_barrier_sigbus(int signo, siginfo_t *info,
         return;
     }
 
+    int record_fd = atomic_load_explicit(&g_macws_jit_forward_record_fd,
+                                         memory_order_acquire);
+    if (record_fd >= 0) {
+        MacWSJITForwardRecord record = {
+            .magic = 0x4d57534a49544657ULL, // "MWSJITFW"
+            .version = 1,
+            .signo = signo,
+            .signal_code = info ? info->si_code : 0,
+            .thread_writable = g_macws_jit_thread_writable ? 1u : 0u,
+            .program_counter = pc,
+            .fault_address = info ? (uintptr_t)info->si_addr : 0,
+            .reservation_count = atomic_load_explicit(
+                &g_macws_jit_range_count, memory_order_relaxed),
+            .executable_range_count = atomic_load_explicit(
+                &g_macws_jit_exec_range_count, memory_order_relaxed),
+            .active_writers = atomic_load_explicit(
+                &g_macws_jit_active_writers, memory_order_relaxed),
+            .write_faults = atomic_load_explicit(
+                &g_macws_jit_write_faults, memory_order_relaxed),
+            .dirty_pages = atomic_load_explicit(
+                &g_macws_jit_dirty_page_count, memory_order_relaxed),
+        };
+        (void)write(record_fd, &record, sizeof(record));
+    }
     macws_jit_forward_sigbus(signo, info, context);
 }
 
@@ -820,15 +969,15 @@ static void macws_jit_ensure_exec_barrier_handler(void) {
 }
 
 static void macws_jit_set_all_permissions(int protection) {
-    unsigned count = atomic_load_explicit(&g_macws_jit_range_count,
+    unsigned count = atomic_load_explicit(&g_macws_jit_exec_range_count,
                                            memory_order_acquire);
     vm_prot_t vmProtection = VM_PROT_NONE;
     if (protection & PROT_READ) vmProtection |= VM_PROT_READ;
     if (protection & PROT_WRITE) vmProtection |= VM_PROT_WRITE;
     if (protection & PROT_EXEC) vmProtection |= VM_PROT_EXECUTE;
     for (unsigned i = 0; i < count; i++) {
-        void *base = (void *)g_macws_jit_ranges[i].base;
-        size_t size = g_macws_jit_ranges[i].size;
+        void *base = (void *)g_macws_jit_exec_ranges[i].base;
+        size_t size = g_macws_jit_exec_ranges[i].size;
         // Runtime-confirmed by `/tmp/vscode-exthost-timeout.sample`: the
         // extension host entered this helper while holding
         // g_macws_jit_state_lock, the dylib-local mprotect call rebound to
@@ -4819,9 +4968,212 @@ static void macws_optimize_stray_steam_overlay_debug_label(
     }
 }
 
+static _Atomic bool g_macws_mono_interpreter_configured = false;
+static _Atomic bool g_macws_mono_jit_import_rebound = false;
+
+// Forward declaration for the exact Mono lazy-import repair below. The
+// ordinary DYLD_INTERPOSE tuple remains the preferred path for images whose
+// bindings dyld rewrites normally.
+void pthread_jit_write_protect_np_new(int enabled);
+
+static void macws_rebind_mono_jit_write_protect_if_requested(
+        const struct mach_header *untyped_header, intptr_t slide,
+        const char *image_path) {
+    if (!getenv("MACWS_MONO_INTERPRETER") ||
+        !getenv("MACWS_JIT_MPROTECT_COMPAT") ||
+        atomic_load_explicit(&g_macws_mono_jit_import_rebound,
+                             memory_order_acquire) ||
+        !untyped_header || untyped_header->magic != MH_MAGIC_64 ||
+        !image_path ||
+        strstr(image_path, "/libmonobdwgc-2.0.dylib") == NULL) {
+        return;
+    }
+
+    // RE-confirmed via otool -l/-Iv on Unity 2022.3.62f2's exact arm64
+    // libmonobdwgc-2.0.dylib (UUID below): _pthread_jit_write_protect_np is
+    // indirect symbol 2382 in writable __DATA,__la_symbol_ptr at vmaddr
+    // 0x30a660. Runtime-confirmed via /var/mobile/7dtd-primary-signal.txt:
+    // Mono's first mini_init codegen scope reached the real iOS
+    // pthread_jit_write_protect_np+516 and trapped at `brk #0x1`. The static
+    // interpose tuple was therefore not applied to this late-loaded flat-
+    // namespace lazy import. Rebind the symbolically identified pointer slot
+    // to the existing W^X adapter; do not patch or skip Mono's call site.
+    static const uint8_t mono_uuid[16] = {
+        0xe0, 0x90, 0xf9, 0xf3, 0x50, 0x91, 0x3c, 0x8e,
+        0x82, 0x5d, 0xb8, 0x63, 0x2a, 0xbf, 0xbb, 0x84,
+    };
+    const struct mach_header_64 *header =
+        (const struct mach_header_64 *)untyped_header;
+    if (!macws_macho_uuid_matches(header, mono_uuid)) return;
+
+    const struct segment_command_64 *linkedit = NULL;
+    const struct symtab_command *symbols = NULL;
+    const struct dysymtab_command *dynamic_symbols = NULL;
+    const struct load_command *command =
+        (const struct load_command *)(header + 1);
+    for (uint32_t index = 0; index < header->ncmds; index++) {
+        if (command->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *segment =
+                (const struct segment_command_64 *)command;
+            if (!strcmp(segment->segname, SEG_LINKEDIT)) linkedit = segment;
+        } else if (command->cmd == LC_SYMTAB) {
+            symbols = (const struct symtab_command *)command;
+        } else if (command->cmd == LC_DYSYMTAB) {
+            dynamic_symbols = (const struct dysymtab_command *)command;
+        }
+        command = (const struct load_command *)
+            ((const uint8_t *)command + command->cmdsize);
+    }
+    if (!linkedit || !symbols || !dynamic_symbols) return;
+
+    uintptr_t linkedit_base = (uintptr_t)slide + linkedit->vmaddr -
+        linkedit->fileoff;
+    const struct nlist_64 *symbol_table =
+        (const struct nlist_64 *)(linkedit_base + symbols->symoff);
+    const char *string_table =
+        (const char *)(linkedit_base + symbols->stroff);
+    const uint32_t *indirect_table =
+        (const uint32_t *)(linkedit_base + dynamic_symbols->indirectsymoff);
+
+    command = (const struct load_command *)(header + 1);
+    for (uint32_t command_index = 0;
+         command_index < header->ncmds; command_index++) {
+        if (command->cmd != LC_SEGMENT_64) {
+            command = (const struct load_command *)
+                ((const uint8_t *)command + command->cmdsize);
+            continue;
+        }
+        const struct segment_command_64 *segment =
+            (const struct segment_command_64 *)command;
+        const struct section_64 *section =
+            (const struct section_64 *)(segment + 1);
+        for (uint32_t section_index = 0;
+             section_index < segment->nsects; section_index++, section++) {
+            uint32_t type = section->flags & SECTION_TYPE;
+            if (type != S_LAZY_SYMBOL_POINTERS &&
+                type != S_NON_LAZY_SYMBOL_POINTERS) continue;
+            uintptr_t *pointers =
+                (uintptr_t *)((uintptr_t)slide + section->addr);
+            size_t count = (size_t)(section->size / sizeof(uintptr_t));
+            for (size_t pointer_index = 0;
+                 pointer_index < count; pointer_index++) {
+                uint32_t indirect_index =
+                    section->reserved1 + (uint32_t)pointer_index;
+                if (indirect_index >= dynamic_symbols->nindirectsyms) break;
+                uint32_t symbol_index = indirect_table[indirect_index];
+                if (symbol_index == INDIRECT_SYMBOL_ABS ||
+                    symbol_index == INDIRECT_SYMBOL_LOCAL ||
+                    symbol_index == (INDIRECT_SYMBOL_LOCAL |
+                                     INDIRECT_SYMBOL_ABS) ||
+                    symbol_index >= symbols->nsyms) continue;
+                uint32_t string_offset =
+                    symbol_table[symbol_index].n_un.n_strx;
+                if (string_offset >= symbols->strsize) continue;
+                const char *name = string_table + string_offset;
+                if (strcmp(name, "_pthread_jit_write_protect_np") != 0)
+                    continue;
+
+                uintptr_t replacement =
+                    (uintptr_t)pthread_jit_write_protect_np_new;
+                uintptr_t previous = __atomic_load_n(
+                    &pointers[pointer_index], __ATOMIC_ACQUIRE);
+                BOOL writable_lazy_slot =
+                    type == S_LAZY_SYMBOL_POINTERS &&
+                    !strcmp(segment->segname, SEG_DATA);
+                if (writable_lazy_slot) {
+                    __atomic_store_n(&pointers[pointer_index], replacement,
+                                     __ATOMIC_RELEASE);
+                } else {
+                    ModifyExecutableRegion(&pointers[pointer_index],
+                                           sizeof(replacement), ^{
+                        __atomic_store_n(&pointers[pointer_index], replacement,
+                                         __ATOMIC_RELEASE);
+                    });
+                }
+                uintptr_t readback = __atomic_load_n(
+                    &pointers[pointer_index], __ATOMIC_ACQUIRE);
+                BOOL installed = readback == replacement;
+                if (installed) {
+                    atomic_store_explicit(&g_macws_mono_jit_import_rebound,
+                                          true, memory_order_release);
+                }
+                fprintf(stderr,
+                        "#### MACWS-MONO-JIT import-rebind image=%s "
+                        "symbol=%s slot=%p vmoff=%#llx previous=%p "
+                        "replacement=%p readback=%p status=%s\n",
+                        image_path, name, &pointers[pointer_index],
+                        (unsigned long long)(
+                            (uintptr_t)&pointers[pointer_index] -
+                            (uintptr_t)header),
+                        (void *)previous, (void *)replacement,
+                        (void *)readback,
+                        installed ? "installed" : "write-failed");
+                fflush(stderr);
+                return;
+            }
+        }
+        command = (const struct load_command *)
+            ((const uint8_t *)command + command->cmdsize);
+    }
+    fprintf(stderr,
+            "#### MACWS-MONO-JIT import-rebind image=%s status=slot-missing\n",
+            image_path);
+    fflush(stderr);
+}
+
+static void macws_configure_mono_interpreter_if_requested(void) {
+    const char *requested = getenv("MACWS_MONO_INTERPRETER");
+    if (!requested || !*requested || strcmp(requested, "0") == 0 ||
+        atomic_exchange_explicit(&g_macws_mono_interpreter_configured, true,
+                                 memory_order_acq_rel)) {
+        return;
+    }
+
+    // Unity embeds Mono and does not consume MONO_ENV_OPTIONS through the
+    // standalone `mono` main program. RE-confirmed via the exact Unity
+    // 2022.3.62f2 arm64 libmonobdwgc-2.0.dylib: exported
+    // mono_jit_set_aot_mode at +0x5b858 dispatches mode 8 to +0x5b9d4,
+    // setting both mono_use_interpreter and
+    // mono_ee_features.force_use_interpreter without setting mono_aot_only.
+    // That is MONO_AOT_MODE_INTERP_ONLY ("Same as --interp") in this Mono
+    // version. Mode 5 is MONO_AOT_MODE_INTERP, the full-AOT interpreter
+    // contract; runtime-confirmed on this player, mode 5 aborts at
+    // aot-runtime.c:5724 because the donor player has no interpreter AOT
+    // wrapper modules. Use the public API so Mono owns every related state
+    // transition. This path is opt-in so ordinary M1/JIT applications retain
+    // their existing execution model.
+    typedef void (*mono_jit_set_aot_mode_fn)(int mode);
+    mono_jit_set_aot_mode_fn set_aot_mode =
+        (mono_jit_set_aot_mode_fn)dlsym(RTLD_DEFAULT,
+                                       "mono_jit_set_aot_mode");
+    int *use_interpreter =
+        (int *)dlsym(RTLD_DEFAULT, "mono_use_interpreter");
+    if (!set_aot_mode) {
+        fprintf(stderr,
+                "#### MACWS-MONO-INTERPRETER unavailable api=%p state=%p\n",
+                set_aot_mode, use_interpreter);
+        atomic_store_explicit(&g_macws_mono_interpreter_configured, false,
+                              memory_order_release);
+        return;
+    }
+    enum { kMonoAOTModeInterpOnly = 8 };
+    set_aot_mode(kMonoAOTModeInterpOnly);
+    fprintf(stderr,
+            "#### MACWS-MONO-INTERPRETER configured "
+            "strategy=mono_jit_set_aot_mode mode=%d state=%d\n",
+            kMonoAOTModeInterpOnly,
+            use_interpreter ? *use_interpreter : -1);
+}
+
 void loadImageCallback(const struct mach_header* header, intptr_t vmaddr_slide) {
     Dl_info info = {};
     (void)dladdr(header, &info);
+    if (info.dli_fname &&
+        strstr(info.dli_fname, "/libmonobdwgc-2.0.dylib") != NULL) {
+        macws_rebind_mono_jit_write_protect_if_requested(
+            header, vmaddr_slide, info.dli_fname);
+        macws_configure_mono_interpreter_if_requested();
+    }
     if (info.dli_fname &&
         strstr(info.dli_fname, "gameoverlayrenderer") != NULL) {
         macws_optimize_stray_steam_overlay_debug_label(header);
@@ -11656,7 +12008,7 @@ void *mmap_new(void *address, size_t size, int protection, int flags, int fd,
     // mprotect transitions after EnableJIT(), so retain that W^X model.
     result = mmap(address, size, protection, flags & ~MAP_JIT, fd, offset);
     if (result != MAP_FAILED) {
-        macws_jit_record_range(result, size);
+        macws_jit_record_range(result, size, protection);
     }
     return result;
 }
@@ -11681,6 +12033,13 @@ int mprotect_new(void *address, size_t size, int protection) {
         }
     }
     int result = mprotect(address, size, effective);
+    if (result == 0 && jit_overlap) {
+        // MAP_JIT can describe a PROT_NONE reservation containing a mixture of
+        // RW runtime data and RWX generated code. Track the caller's intended
+        // executable subranges after a successful protection change; global
+        // pthread_jit transitions must never make the RW-only pages RX.
+        macws_jit_update_exec_range(address, size, protection);
+    }
     if (jit_overlap && getenv("MACWS_JIT_MPROTECT_TRACE")) {
         unsigned sequence = atomic_fetch_add_explicit(
             &g_macws_jit_mprotect_calls, 1, memory_order_relaxed) + 1;

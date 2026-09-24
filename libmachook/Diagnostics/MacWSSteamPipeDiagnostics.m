@@ -80,20 +80,26 @@ DYLD_INTERPOSE(MacWSSteamPipeMkfifo, mkfifo)
 DYLD_INTERPOSE(MacWSSteamPipeUnlink, unlink)
 
 // Diagnostic-only: ElleKit installs a task exception port the first time its
-// JIT-less hook machinery is used. For Steam Helper this converts the original
-// startup exception into exit(1), so neither CrashReporter nor LLDB receives
-// the faulting state. Refuse only CydiaSubstrate's exact installation call
-// under an explicit one-shot flag; every other task_set_exception_ports call
-// and all production runs preserve the native kernel result.
-static bool MacWSIsTopLevelSteamHelperForNativeException(void) {
+// JIT-less hook machinery is used. For Steam Helper and separately signed
+// macws-runtime game shadows this converts the original startup exception into
+// exit(1), so neither CrashReporter nor LLDB receives the faulting state.
+// Refuse only CydiaSubstrate's exact installation call under an explicit
+// one-shot flag; every other task_set_exception_ports call and all production
+// runs preserve the native kernel result.
+static bool MacWSIsSteamNativeExceptionDiagnosticTarget(void) {
     const char *program = getprogname();
-    if (!program || strcmp(program, "Steam Helper")) return false;
-    char ***argumentsPointer = _NSGetArgv();
-    char **arguments = argumentsPointer ? *argumentsPointer : NULL;
-    for (size_t index = 1; arguments && arguments[index]; index++) {
-        if (!strncmp(arguments[index], "--type=", 7)) return false;
+    if (program && strcmp(program, "Steam Helper") == 0) {
+        char ***argumentsPointer = _NSGetArgv();
+        char **arguments = argumentsPointer ? *argumentsPointer : NULL;
+        for (size_t index = 1; arguments && arguments[index]; index++) {
+            if (!strncmp(arguments[index], "--type=", 7)) return false;
+        }
+        return true;
     }
-    return true;
+    char executable[PATH_MAX] = {};
+    uint32_t executableSize = sizeof(executable);
+    return _NSGetExecutablePath(executable, &executableSize) == 0 &&
+        strstr(executable, "/steamapps/macws-runtime/") != NULL;
 }
 
 static bool MacWSIsAnySteamHelper(void) {
@@ -658,7 +664,7 @@ static kern_return_t MacWSSteamDiagnosticTaskSetExceptionPorts(
     task_t task, exception_mask_t mask, mach_port_t newPort,
     exception_behavior_t behavior, thread_state_flavor_t flavor) {
     if (getenv("MACWS_STEAM_NATIVE_EXCEPTION_DIAGNOSTICS") &&
-        MacWSIsTopLevelSteamHelperForNativeException()) {
+        MacWSIsSteamNativeExceptionDiagnosticTarget()) {
         Dl_info caller = {0};
         void *returnAddress = __builtin_return_address(0);
         if (dladdr(returnAddress, &caller) && caller.dli_fname &&

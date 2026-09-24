@@ -9,7 +9,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -63,6 +65,26 @@ static void enable_debugged_jit(void) {
     }
     while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {
     }
+}
+
+static bool request_debugged_from_autosignd(void) {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return false;
+    struct sockaddr_un address = {0};
+    address.sun_family = AF_UNIX;
+    const char *socket_path = access("/var/mnt/rootfs/tmp/autosignd.sock",
+                                     F_OK) == 0
+        ? "/var/mnt/rootfs/tmp/autosignd.sock"
+        : "/tmp/autosignd.sock";
+    strlcpy(address.sun_path, socket_path,
+            sizeof(address.sun_path));
+    bool ok = connect(fd, (struct sockaddr *)&address,
+                      sizeof(address)) == 0 &&
+        write(fd, "DEBUG\n", 6) == 6;
+    char reply[8] = {0};
+    ssize_t count = ok ? read(fd, reply, sizeof(reply) - 1) : -1;
+    close(fd);
+    return count > 0 && strncmp(reply, "OK\n", 3) == 0;
 }
 
 static void probe_with_fd(const char *label, size_t size, int protection,
@@ -135,6 +157,46 @@ static void probe_debugged_rwx(void) {
     }
     putchar('\n');
     if (transition != MAP_FAILED) munmap(transition, page);
+
+    // Match the compatibility path used by macOS runtimes in the chroot:
+    // reserve without MAP_JIT, make the page writable, publish generated
+    // instructions, then remove write permission before the first fetch.
+    errno = 0;
+    void *wx_transition = mmap(NULL, page, PROT_NONE, flags, -1, 0);
+    map_errno = errno;
+    int rw_result = -1;
+    int rw_errno = 0;
+    int rx_result = -1;
+    int rx_errno = 0;
+    if (wx_transition != MAP_FAILED) {
+        errno = 0;
+        rw_result = mprotect(wx_transition, page,
+                             PROT_READ | PROT_WRITE);
+        rw_errno = errno;
+        if (rw_result == 0) {
+            const uint32_t code[] = {
+                0x52800540, // mov w0, #42
+                0xd65f03c0, // ret
+            };
+            memcpy(wx_transition, code, sizeof(code));
+            sys_icache_invalidate(wx_transition, sizeof(code));
+            errno = 0;
+            rx_result = mprotect(wx_transition, page,
+                                 PROT_READ | PROT_EXEC);
+            rx_errno = errno;
+        }
+    }
+    printf("%-24s size=0x%zx map=%p/%d mprotect(RW)=%d/%d(%s) "
+           "mprotect(RX)=%d/%d(%s)",
+           "none->rw->rx/no-jit", page, wx_transition, map_errno,
+           rw_result, rw_errno, strerror(rw_errno), rx_result, rx_errno,
+           strerror(rx_errno));
+    if (wx_transition != MAP_FAILED && rw_result == 0 && rx_result == 0) {
+        int (*function)(void) = wx_transition;
+        printf(" code()=%d", function());
+    }
+    putchar('\n');
+    if (wx_transition != MAP_FAILED) munmap(wx_transition, page);
 }
 
 int main(int argc, char **argv) {
@@ -151,7 +213,18 @@ int main(int argc, char **argv) {
                       (int)0xff000000u, false);
         return 0;
     }
-    enable_debugged_jit();
+    if (argc > 1 && strcmp(argv[1], "autosignd") == 0) {
+        printf("autosignd DEBUG reply=%s\n",
+               request_debugged_from_autosignd() ? "OK" : "FAIL");
+    } else if (argc > 1 && strcmp(argv[1], "external-debug") == 0) {
+        // Give the operator a bounded window to run the jailbreak's real
+        // `jbctl proc_set_debugged <pid>` path. This distinguishes that
+        // authorization mechanism from the historical ptrace child trick.
+        printf("waiting 5 seconds for external proc_set_debugged\n");
+        sleep(5);
+    } else {
+        enable_debugged_jit();
+    }
     uint32_t after = code_signing_flags();
     printf("csflags_after=0x%08x CS_DEBUGGED=%s\n", after,
            (after & CS_DEBUGGED) != 0 ? "yes" : "no");

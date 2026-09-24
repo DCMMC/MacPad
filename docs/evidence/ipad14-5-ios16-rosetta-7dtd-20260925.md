@@ -5,8 +5,10 @@
 This note records the attempted launch of Steam app 251570 on an iPad14,5
 (M2) running iOS 16.0 build 20A8372 and a macOS 13.4 build 22F66 chroot.
 
-**Result: the game did not reach process start, so no FPS result exists.**  The
-installed macOS depot is x86_64-only, while this iOS kernel returns
+**Result: the stock game did not reach process start, and the experimental
+arm64 rehost did not finish Mono assembly reload, so no rendered-frame or FPS
+witness exists.**  The current public depot is not merely an x86 launcher:
+its Unity player and Mono runtime are x86_64 too.  This iOS kernel returns
 `EBADARCH` instead of constructing a Rosetta translated task.  An experimental
 userspace setup got far enough to build a valid 844 MB Rosetta AOT shared
 cache, but the same x86_64 exec still failed.  This separates the working AOT
@@ -45,6 +47,97 @@ db328ca13bd59914f75d7fbc88d3299c2332f5a0266037ca0a9bb2fdfabfb11c
 Steam recorded six real launch attempts in `logs/gameprocess_log.txt`, all
 ending in `OS Error 256`; `console_log.previous.txt` recorded matching
 `LaunchApp failed` events for app 251570.
+
+A complete Mach-O inventory found 14 binaries. Four plugins were universal
+arm64+x86_64 (`InControlNative`, EOS, Discord, and `steam_api`), but the game
+executable, `UnityPlayer.dylib`, all three Mono runtime/helper dylibs, Burst
+generated library, launcher, EAC entry, Magick, and MouseLib were x86_64-only.
+The player data identifies the exact engine as:
+
+```text
+2022.3.62f2 (7670c08855a9)
+```
+
+This runtime evidence disproves the initial assumption that only the launcher
+needed translation. The managed assemblies and asset data are portable, but
+the native player/runtime required either Rosetta or a matched arm64 player.
+
+## Experimental arm64 Unity rehost
+
+Unity's exact signed Mono player support package was downloaded from the
+official Unity archive:
+
+```text
+UnitySetup-Mac-Mono-Support-for-Editor-2022.3.62f2.pkg
+SHA-256 ada8c5ebaa3431d54a5490df95196d8b439a55d57a703c5aade9d48fd33375e9
+```
+
+Its `macos_arm64_player_nondevelopment_mono` main executable,
+`UnityPlayer.dylib`, `libmonobdwgc-2.0.dylib`, `libmono-native.dylib`, and
+`libMonoPosixHelper.dylib` were placed in a separately signed
+`7DaysToDie-ARM.app`. The app links to the installed game's Resources, Mono
+configuration, and data instead of modifying Valve's depot. Runtime-confirmed
+positive progress was:
+
+```text
+Initialize engine version: 2022.3.62f2 (7670c08855a9)
+[PhysX] Initialized MultithreadedTaskDispatcher with 8 workers.
+Begin MonoManager ReloadAssembly
+```
+
+The arm64 rehost therefore proves that the game data can be opened by the
+matched arm64 Unity player. It is not yet a playable port.
+
+### Mono interpreter/JIT evidence
+
+RE-confirmed via the exact arm64 Mono UUID
+`E090F9F3-5091-3C8E-825D-B8632ABFBB84`:
+
+- `mono_jit_set_aot_mode(8)` sets `mono_use_interpreter` and
+  `force_use_interpreter` without enabling `mono_aot_only`; Unity's Mono source
+  names this `MONO_AOT_MODE_INTERP_ONLY` (the `--interp` behavior).
+- Mode 5 is the full-AOT interpreter contract and runtime-aborted at
+  `aot-runtime.c:5724` because this normal player has no interpreter wrapper
+  AOT modules.
+- Directly setting only `mono_use_interpreter` mixed interpreter and JIT
+  delegate ABIs and faulted in `interp_init_delegate+116`; that diagnostic was
+  discarded.
+
+Mode 8 first reached a real iOS incompatibility in
+`pthread_jit_write_protect_np+516` (`brk #1`). `otool -Iv` identifies Mono's
+late-bound `_pthread_jit_write_protect_np` slot at `__DATA,__la_symbol_ptr`
+vmaddr `0x30a660`. Rebinding that symbolically identified slot to the existing
+W^X compatibility implementation (only for the exact UUID and opt-in mode)
+removed that trap. A subsequent no-debug run handled 331 expected page-write
+faults before reaching the next genuine fault.
+
+The bounded binary flight record captured the fault state below. A temporary
+extended record used only for this diagnosis also recorded
+`fault_in_recorded_executable_range=0`; that extension was removed after it
+disproved the writable-JIT-page hypothesis.
+
+```text
+signal=10 code=1 thread_writable=0
+pc=libmonobdwgc+0x2180b4
+fault=0x10517fff8 reservations=4 executable_ranges=2
+active_writers=0 handled_write_faults=331 dirty_pages=13
+fault_in_recorded_executable_range=0
+```
+
+RE-confirmed via the exact dylib disassembly, `+0x2180b4` is
+`mono_gc_memmove_aligned+200`, an `ldr x11, [x9, x10, lsl #3]`. Runtime
+`vmmap` placed the fault address in the final eight bytes of
+`104d80000-105180000 ---/rwx`; the next mapping began at `105180000` and was
+RX. This is an invalid read from an uncommitted reservation, not a W^X write
+fault and not a check that can safely be bypassed. The temporary hypothesis
+that the page merely needed to be made writable was disproved and that patch
+was removed.
+
+The cause of Mono's invalid source range remains **THEORY**, not established
+fact. The next useful evidence is the first-fault x0-x11/caller capture to
+determine whether mode-8 interpreter state supplied a corrupt copy range or
+whether the matched donor player expects an allocator contract absent in this
+chroot.
 
 ## Rosetta userspace findings
 
@@ -146,8 +239,14 @@ construction, Mach message compatibility, and thread-state conversion behind
 Mach-O entry and is entered through the kernel-established Rosetta ABI, so
 executing it as a normal command is not an equivalent fallback.
 
-This is not a single architecture predicate that can be safely forced.  A
+This is not a single architecture predicate that can be safely forced. A
 correct port needs the missing translated-task kernel contract (or a complete
-userspace Mach-O loader reproducing it).  Until that exists, an x86_64-only
-7 Days to Die build cannot start on this iOS kernel, and a claim of normal
-graphics or M2-MacBook-equivalent FPS would have no runtime evidence.
+userspace Mach-O loader reproducing it). Until that exists, the stock x86_64
+Unity player cannot start on this iOS kernel. `RosettaLinux` is an arm64 ELF
+component for a Linux guest launched by macOS Virtualization.framework, not a
+drop-in macOS/iOS Mach-O translator; the device also exposes no `binfmt_misc`
+and has no QEMU/Box64/FEX runtime installed. A full emulated macOS guest would
+additionally lose the native display/GPU path this project is trying to
+validate. The arm64 rehost is therefore the only tested userspace bypass so
+far, and its Mono fault means a claim of normal graphics or
+M2-MacBook-equivalent FPS would still have no runtime evidence.
