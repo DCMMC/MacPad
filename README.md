@@ -35,6 +35,27 @@ Features:
     - Fixed size window
 * Fullscreen Mode:
     - Run macOS desktop in fullscreen
+ 
+## Starting up
+
+Prepare macOS rootfs installation as per [this link](https://github.com/DCMMC/MacWSBootingGuide#setting-up-macos-full-installation)
+
+build macPad in macOS:
+
+```
+# edit DEVICE_IP/DEVICE_PORT at the top of misc/build.sh to match your iPad/iPhone
+bash misc/build.sh
+# you can also build it on iOS
+# bash misc/build_on_ios.sh
+```
+
+run macPad in your iPad/iPhone device:
+
+```
+sudo bash /var/jb/usr/macOS/bin/postinst.sh
+# enter macOS bash environment
+sudo bash /var/jb/usr/macOS/bin/run_bash.sh
+```
 
 ## Note
 
