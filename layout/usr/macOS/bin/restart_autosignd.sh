@@ -29,12 +29,27 @@ done
 
 # A package can be configured before the macOS rootfs is mounted. In that
 # state there is no socket namespace shared with the future chroot, so defer
-# daemon publication to the normal startup repair instead of creating a
-# misleading iOS-root socket.
-if [ ! -d /var/mnt/rootfs/tmp ]; then
-    echo '[INFO] autosignd start deferred until the macOS rootfs is mounted'
-    exit 0
+# daemon publication instead of creating a misleading iOS-root socket.
+# Filtered rootfs backups intentionally omit private/tmp while preserving the
+# stock /tmp -> private/tmp symlink. Once SystemVersion.plist proves that the
+# real rootfs is present, recreate that volatile directory before publishing
+# the socket; otherwise a freshly restored system cannot execute even bash.
+ROOTFS=/var/mnt/rootfs
+if [ ! -d "$ROOTFS/tmp" ]; then
+    if [ ! -f "$ROOTFS/System/Library/CoreServices/SystemVersion.plist" ]; then
+        echo '[INFO] autosignd start deferred until the macOS rootfs is mounted'
+        exit 0
+    fi
+    mkdir -p "$ROOTFS/private/tmp" || exit 1
+    chmod 1777 "$ROOTFS/private/tmp" || exit 1
+    if [ ! -e "$ROOTFS/tmp" ] && [ ! -L "$ROOTFS/tmp" ]; then
+        ln -s private/tmp "$ROOTFS/tmp" || exit 1
+    fi
 fi
+[ -d "$ROOTFS/tmp" ] || {
+    echo '[ERROR] macOS rootfs /tmp is not a usable directory' >&2
+    exit 1
+}
 
 # Package configuration, GUI startup, and desktop recovery can request this
 # lifecycle at the same time. Serialize the complete kill/publish/probe

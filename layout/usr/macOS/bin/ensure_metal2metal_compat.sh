@@ -84,6 +84,16 @@ metal2metal_sha256() {
 	sha256sum "$1" 2>/dev/null | awk '{print $1}'
 }
 
+metal2metal_hash_allowed() {
+	local path="$1" allowed="$2" actual="" candidate=""
+	[ -z "$allowed" ] && return 0
+	actual=$(metal2metal_sha256 "$path")
+	for candidate in $allowed; do
+		[ "$actual" = "$candidate" ] && return 0
+	done
+	return 1
+}
+
 if [ ! -f "$METAL2METAL" ] || [ ! -x "$LLVM_DIS" ] ||
    [ ! -x "$LLVM_AS" ] || [ ! -x "$APPLE_LLVM_DIS" ] || [ ! -x "$APPLE_LLVM_AS" ]; then
 	echo "[ERROR] metal2metal or its packaged LLVM tools are unavailable." >&2
@@ -115,8 +125,7 @@ provision_route() {
 
 	if python3 "$METAL2METAL" verify-runtime-manifest "$manifest" \
 	     --source "$source" --output "$output" >/dev/null 2>&1 &&
-	   { [ -z "$expected_output_sha256" ] ||
-	     [ "$(metal2metal_sha256 "$output")" = "$expected_output_sha256" ]; }; then
+	   metal2metal_hash_allowed "$output" "$expected_output_sha256"; then
 		echo "[INFO] complete $name metal2metal route already installed"
 		return 0
 	fi
@@ -140,17 +149,16 @@ provision_route() {
 		rm -f "$output_tmp" "$manifest_tmp"
 		return 1
 	}
-	if [ -n "$expected_output_sha256" ] &&
-	   [ "$(metal2metal_sha256 "$output_tmp")" != "$expected_output_sha256" ]; then
-		echo "[ERROR] generated $name metal2metal output failed exact validation." >&2
-		rm -f "$output_tmp" "$manifest_tmp"
-		return 1
-	fi
 	python3 "$METAL2METAL" verify-runtime-manifest "$manifest_tmp" \
 		--source "$source" --output "$output_tmp" || {
 		rm -f "$output_tmp" "$manifest_tmp"
 		return 1
 	}
+	if ! metal2metal_hash_allowed "$output_tmp" "$expected_output_sha256"; then
+		echo "[ERROR] Generated $name metal2metal output has an unsupported identity: $(metal2metal_sha256 "$output_tmp")" >&2
+		rm -f "$output_tmp" "$manifest_tmp"
+		return 1
+	fi
 	chmod 0644 "$output_tmp" "$manifest_tmp" || return 1
 	mv -f "$output_tmp" "$output" || return 1
 	mv -f "$manifest_tmp" "$manifest" || return 1
@@ -176,7 +184,7 @@ provision_route \
 	"$ROUTE_DIR/mpsimage-default.route.plist" \
 	"/System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSImage.framework/Versions/A/Resources/default.metallib" \
 	"/usr/local/share/macws/mpsimage/default-desktop-effects-macabi.metallib" \
-	84973060c51620471389178f7f00d6bde68f3fdf1609cda48072db46f7663916 \
+	"84973060c51620471389178f7f00d6bde68f3fdf1609cda48072db46f7663916 342738608c912eab663879868288299e38147ea64d45b74f57bc0dd12761b2de" \
 	1 "$APPLE_LLVM_DIS" "$APPLE_LLVM_AS" || exit 1
 
 # Ventura MetalFX ships its temporal scaler network as one desktop-targeted

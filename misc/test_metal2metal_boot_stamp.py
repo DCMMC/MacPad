@@ -1,6 +1,7 @@
 """Execute the production shell fingerprint against owned filesystem fixtures."""
 import os
 from pathlib import Path
+import hashlib
 import shlex
 import string
 import subprocess
@@ -111,6 +112,35 @@ class MetalBootStamp(unittest.TestCase):
         self.assertEqual((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns // 10**9),
                          (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns // 10**9))
         self.assertNotEqual(stamp, self.stamp())
+
+
+class MetalOutputIdentity(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="macws-metal-hash-")
+        self.addCleanup(self.temp.cleanup)
+        self.output = Path(self.temp.name) / "output.metallib"
+        self.output.write_bytes(b"stable translator output")
+        source = SCRIPT.read_text()
+        start = source.index("metal2metal_sha256() {")
+        end = source.index("\nif [ ! -f \"$METAL2METAL\" ]", start)
+        self.functions = source[start:end]
+
+    def allowed(self, identities):
+        result = subprocess.run(
+            ["bash", "-c", self.functions +
+             "\nmetal2metal_hash_allowed \"$1\" \"$2\"", "bash",
+             str(self.output), identities],
+            capture_output=True, text=True)
+        return result.returncode == 0
+
+    def test_output_identity_accepts_any_explicitly_pinned_hash(self):
+        actual = hashlib.sha256(self.output.read_bytes()).hexdigest()
+        self.assertTrue(self.allowed("0" * 64 + " " + actual))
+        self.assertTrue(self.allowed(actual + " " + "f" * 64))
+        self.assertFalse(self.allowed("0" * 64 + " " + "f" * 64))
+
+    def test_unpinned_route_accepts_manifest_verified_output(self):
+        self.assertTrue(self.allowed(""))
 
 
 if __name__ == "__main__":

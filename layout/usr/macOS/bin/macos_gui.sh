@@ -253,6 +253,7 @@ DEFAULTS_BIN=/usr/bin/defaults
 LSREGISTER_BIN=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 WORKSPACECTL_BIN=/usr/local/bin/macwsworkspacectl
 LSD_SESSION_USER_DIR=/var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/0/macws-lsd-session/
+LSD_SYSTEM_DATA_VAULT_DIR=/var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/0/com.apple.LaunchServices.dv
 LAUNCHSERVICES_VERIFY_LOG="$LOGDIR/launchservices-catalog-verify.log"
 SETTINGS_EXTENSION_REGISTER_LOG="$LOGDIR/settings-extension-register.log"
 SETTINGS_EXTENSIONS_RUNTIME=/var/jb/usr/macOS/bin/ensure_settings_extensions_runtime.sh
@@ -1771,9 +1772,27 @@ ensure_cfprefsd_dirhelper_tree() {
 
 ensure_launchservices_session_user_dir() {
     local directory="$ROOTFS$LSD_SESSION_USER_DIR"
+    local system_data_vault="$ROOTFS$LSD_SYSTEM_DATA_VAULT_DIR"
     mkdir -p "$directory" || return 1
     chown root:wheel "$directory" 2>/dev/null || true
     chmod 0700 "$directory" || return 1
+
+    # RE-confirmed against Ventura 13.4 LaunchServices on iPad14,5:
+    # -[_LSDefaults dataVaultURLWithUID:] at unslid 0x180a25fc4 calls
+    # __user_local_dirname(0), appends com.apple.LaunchServices.dv, then calls
+    # rootless_mkdir_datavault.  The iOS 16.0 host creates an ordinary child
+    # here but rejects the macOS DataVault-label operation with EPERM and the
+    # libc routine removes that child again.  A filtered rootfs restore lacks
+    # the persistent directory that a normal macOS boot already has; lsd then
+    # returns nil from databaseStoreFileURLWithUID: and crashes while seeding.
+    # Provision that real root-only store before either stock lsd starts.  On
+    # an existing directory Apple's unchanged routine observes EEXIST and
+    # returns its real csstore URL; no Objective-C result or assertion is
+    # replaced. Runtime-confirmed on iOS 16.0 with the generated
+    # com.apple.LaunchServices-4035-v2.csstore and a completed -kill -seed.
+    mkdir -p "$system_data_vault" || return 1
+    chown root:wheel "$system_data_vault" 2>/dev/null || true
+    chmod 0700 "$system_data_vault" || return 1
 }
 
 # iconservicesd deliberately runs as Ventura's _iconservices account

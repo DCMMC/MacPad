@@ -2485,6 +2485,170 @@ overlappingModelBeforeDragging:(id)overlappingModelBeforeDragging
     }
     return result;
 }
+
+// Runtime-confirmed on iPad14,5 / iPadOS 16.0 (20A8372) via the diagnostic
+// method inventory at 1790262629.176: this release has no
+// `nearestGridSizeForProposedSize:countOnStage:...` entry point and no
+// `SBSwitcherChamoisSettings _nearestGridSizeForSize:...` leaf. Its real
+// SBDisplayItemLayoutGrid entry point is this six-argument variant with type
+// encoding `{CGSize=dd}96@0:8{CGSize=dd}16{CGRect={CGPoint=dd}{CGSize=dd}}32q64@72d80@88`.
+// Keep the same Host-only ownership, cache invalidation, candidate expansion,
+// and exact restoration invariants as the 16.3 path above. If the newer
+// countOnStage selector exists, return directly to Apple so a release that
+// exposes both entry points cannot run two compatibility transactions.
+- (CGSize)nearestGridSizeForProposedSize:(CGSize)proposedSize
+                                inBounds:(CGRect)bounds
+                      contentOrientation:(NSInteger)contentOrientation
+                   layoutRestrictionInfo:(id)layoutRestrictionInfo
+                             screenScale:(CGFloat)screenScale
+                chamoisLayoutAttributes:(id)chamoisLayoutAttributes {
+    SEL countOnStageSelector = NSSelectorFromString(
+        @"nearestGridSizeForProposedSize:countOnStage:inBounds:contentOrientation:layoutRestrictionInfo:screenScale:chamoisLayoutAttributes:");
+    if (class_getInstanceMethod(object_getClass((id)self),
+                                countOnStageSelector))
+        return %orig(proposedSize, bounds, contentOrientation,
+                     layoutRestrictionInfo, screenScale,
+                     chamoisLayoutAttributes);
+
+    BOOL itemScope = MacWSItemLayoutScopeDepth > 0;
+    BOOL stageLimitScope = MacWSGroupLayoutScopeDepth > 0 && !itemScope;
+    BOOL scopedHostItem = itemScope &&
+        MacWSActiveLayoutSceneIdentifier.length > 0;
+    BOOL activeHost = MacWSResizeModifierTargetsHost(
+        MacWSActiveResizeGestureModifier);
+    NSDictionary *associatedPolicy = objc_getAssociatedObject(
+        self, &MacWSLayoutGridHostPolicyAssociationKey);
+    BOOL initialScope = scopedHostItem && MacWSInitialLayoutScopeDepth > 0 &&
+        MacWSActiveDenseGridPolicy != nil;
+    BOOL initialHost = initialScope;
+    BOOL programmaticHost = !initialScope && MacWSDenseGridScopeDepth > 0 &&
+        MacWSActiveDenseGridPolicy != nil;
+    BOOL host = !stageLimitScope && (itemScope ? scopedHostItem :
+        (activeHost || associatedPolicy != nil || programmaticHost));
+    NSDictionary *policy = itemScope
+        ? (scopedHostItem ? MacWSActiveDenseGridPolicy : nil)
+        : (stageLimitScope ? nil :
+           ((activeHost || programmaticHost)
+               ? MacWSActiveDenseGridPolicy : associatedPolicy));
+    if (initialHost) MacWSInitialGridObserved = YES;
+
+    NSNumber *lastScope = objc_getAssociatedObject(
+        self, &MacWSLayoutGridLastHostScopeAssociationKey);
+    BOOL changedScope = lastScope && lastScope.boolValue != host;
+    if (changedScope || (!lastScope && host)) {
+        SEL clearSelector = NSSelectorFromString(@"clearCachedGrids");
+        if ([(id)self respondsToSelector:clearSelector])
+            ((void (*)(id, SEL))objc_msgSend)((id)self, clearSelector);
+    }
+    if (!lastScope || changedScope) {
+        objc_setAssociatedObject(
+            self, &MacWSLayoutGridLastHostScopeAssociationKey, @(host),
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        MacWSWindowingLogLine([NSString stringWithFormat:
+            @"dense-grid-16.0-scope target=%@ proposed=%.1fx%.1f cache-cleared=%@",
+            host ? @"com.macwsguide.host" : @"stock-app",
+            proposedSize.width, proposedSize.height,
+            (changedScope || host) ? @"YES" : @"NO"]);
+    }
+
+    CGSize constrainedSize = proposedSize;
+    if (policy) {
+        CGFloat minimumWidth = [policy[@"minimum_width"] doubleValue];
+        CGFloat minimumHeight = [policy[@"minimum_height"] doubleValue];
+        CGFloat maximumWidth = [policy[@"maximum_width"] doubleValue];
+        CGFloat maximumHeight = [policy[@"maximum_height"] doubleValue];
+        if (initialHost || [policy[@"fixed_width"] boolValue])
+            constrainedSize.width = [policy[@"target_width"] doubleValue];
+        else
+            constrainedSize.width = MAX(constrainedSize.width, minimumWidth);
+        if (initialHost || [policy[@"fixed_height"] boolValue])
+            constrainedSize.height = [policy[@"target_height"] doubleValue];
+        else
+            constrainedSize.height = MAX(constrainedSize.height, minimumHeight);
+        if (maximumWidth > 0.0)
+            constrainedSize.width = MIN(constrainedSize.width, maximumWidth);
+        if (maximumHeight > 0.0)
+            constrainedSize.height = MIN(constrainedSize.height, maximumHeight);
+    }
+
+    NSDictionary *previousPolicy = MacWSActiveDenseGridPolicy;
+    CGSize previousProposal = MacWSActiveDenseGridProposal;
+    NSArray<NSNumber *> *originalWidths = nil;
+    NSArray<NSNumber *> *originalHeights = nil;
+    NSArray<NSNumber *> *denseWidths = nil;
+    NSArray<NSNumber *> *denseHeights = nil;
+    if (host) {
+        MacWSActiveDenseGridPolicy = policy;
+        MacWSActiveDenseGridProposal = constrainedSize;
+        NSUInteger outerDepth = MacWSDenseGridScopeDepth;
+        MacWSDenseGridScopeDepth = 0;
+        @try {
+            originalWidths = MacWSMessageObject(
+                chamoisLayoutAttributes, NSSelectorFromString(@"gridWidths"));
+            originalHeights = MacWSMessageObject(
+                chamoisLayoutAttributes, NSSelectorFromString(@"gridHeights"));
+        } @finally {
+            MacWSDenseGridScopeDepth = outerDepth;
+        }
+        denseWidths = MacWSDenseCandidates(originalWidths, "host-width-16.0");
+        denseHeights = MacWSDenseCandidates(
+            originalHeights, "host-height-16.0");
+        SEL setWidths = NSSelectorFromString(@"setGridWidths:");
+        SEL setHeights = NSSelectorFromString(@"setGridHeights:");
+        if ([chamoisLayoutAttributes respondsToSelector:setWidths] &&
+            denseWidths)
+            ((void (*)(id, SEL, id))objc_msgSend)(
+                chamoisLayoutAttributes, setWidths, denseWidths);
+        if ([chamoisLayoutAttributes respondsToSelector:setHeights] &&
+            denseHeights)
+            ((void (*)(id, SEL, id))objc_msgSend)(
+                chamoisLayoutAttributes, setHeights, denseHeights);
+        SEL clearSelector = NSSelectorFromString(@"clearCachedGrids");
+        if ([(id)self respondsToSelector:clearSelector])
+            ((void (*)(id, SEL))objc_msgSend)((id)self, clearSelector);
+        MacWSDenseGridScopeDepth++;
+    }
+
+    CGSize result = CGSizeZero;
+    @try {
+        result = %orig(constrainedSize, bounds, contentOrientation,
+                       layoutRestrictionInfo, screenScale,
+                       chamoisLayoutAttributes);
+    } @finally {
+        if (host) {
+            MacWSDenseGridScopeDepth--;
+            SEL setWidths = NSSelectorFromString(@"setGridWidths:");
+            SEL setHeights = NSSelectorFromString(@"setGridHeights:");
+            if ([chamoisLayoutAttributes respondsToSelector:setWidths] &&
+                originalWidths)
+                ((void (*)(id, SEL, id))objc_msgSend)(
+                    chamoisLayoutAttributes, setWidths, originalWidths);
+            if ([chamoisLayoutAttributes respondsToSelector:setHeights] &&
+                originalHeights)
+                ((void (*)(id, SEL, id))objc_msgSend)(
+                    chamoisLayoutAttributes, setHeights, originalHeights);
+            SEL clearSelector = NSSelectorFromString(@"clearCachedGrids");
+            if ([(id)self respondsToSelector:clearSelector])
+                ((void (*)(id, SEL))objc_msgSend)((id)self, clearSelector);
+            MacWSActiveDenseGridProposal = previousProposal;
+            MacWSActiveDenseGridPolicy = previousPolicy;
+        }
+    }
+
+    if (host) {
+        MacWSWindowingLogLine([NSString stringWithFormat:
+            @"dense-grid-16.0-result grid=%p proposed=%.1fx%.1f constrained=%.1fx%.1f result=%.1fx%.1f candidates=%lux%lu stock=%lux%lu policy=%@",
+            self, proposedSize.width, proposedSize.height,
+            constrainedSize.width, constrainedSize.height,
+            result.width, result.height,
+            (unsigned long)denseWidths.count,
+            (unsigned long)denseHeights.count,
+            (unsigned long)originalWidths.count,
+            (unsigned long)originalHeights.count,
+            policy[@"scene_identifier"] ?: @"none"]);
+    }
+    return result;
+}
 %end
 
 %hook SBSwitcherChamoisSettings
@@ -2588,15 +2752,37 @@ static void MacWSInstallRequestObservers(void *context) {
         Method leafGridMethod = chamoisSettingsClass
             ? class_getInstanceMethod(chamoisSettingsClass, leafGridSelector)
             : NULL;
+        Class layoutGridClass = NSClassFromString(@"SBDisplayItemLayoutGrid");
+        SEL countOnStageGridSelector = NSSelectorFromString(
+            @"nearestGridSizeForProposedSize:countOnStage:inBounds:contentOrientation:layoutRestrictionInfo:screenScale:chamoisLayoutAttributes:");
+        Method countOnStageGridMethod = layoutGridClass
+            ? class_getInstanceMethod(
+                layoutGridClass, countOnStageGridSelector) : NULL;
+        SEL ios16GridSelector = NSSelectorFromString(
+            @"nearestGridSizeForProposedSize:inBounds:contentOrientation:layoutRestrictionInfo:screenScale:chamoisLayoutAttributes:");
+        Method ios16GridMethod = layoutGridClass
+            ? class_getInstanceMethod(layoutGridClass, ios16GridSelector)
+            : NULL;
+        BOOL ios16GridPath = ios16GridMethod && !countOnStageGridMethod;
+        BOOL denseGridPath = leafGridMethod || ios16GridPath;
         MacWSWindowingLogLine([NSString stringWithFormat:
-            @"initial-size method-metadata class=%@ selector=%@ encoding=%s leaf-class=%@ leaf-selector=%@ leaf-encoding=%s",
+            @"initial-size method-metadata class=%@ selector=%@ encoding=%s leaf-class=%@ leaf-selector=%@ leaf-encoding=%s grid-class=%@ count-selector=%@ count-encoding=%s ios16-selector=%@ ios16-encoding=%s selected=%@",
             coordinatorClass ? @"YES" : @"NO",
             initialMethod ? @"YES" : @"NO",
             initialMethod ? method_getTypeEncoding(initialMethod) : "missing",
             chamoisSettingsClass ? @"YES" : @"NO",
             leafGridMethod ? @"YES" : @"NO",
             leafGridMethod ? method_getTypeEncoding(leafGridMethod) :
-                "missing"]);
+                "missing",
+            layoutGridClass ? @"YES" : @"NO",
+            countOnStageGridMethod ? @"YES" : @"NO",
+            countOnStageGridMethod
+                ? method_getTypeEncoding(countOnStageGridMethod) : "missing",
+            ios16GridMethod ? @"YES" : @"NO",
+            ios16GridMethod ? method_getTypeEncoding(ios16GridMethod) :
+                "missing",
+            leafGridMethod ? @"leaf" :
+                (ios16GridPath ? @"ios16-grid" : @"none")]);
         Class transitionRequestClass = NSClassFromString(
             @"SBMutableSwitcherTransitionRequest");
         MacWSWindowingLogLine([NSString stringWithFormat:
@@ -2624,9 +2810,9 @@ static void MacWSInstallRequestObservers(void *context) {
         // request observers exist; real geometry remains the success witness.
         MacWSWindowingCapabilities = MacWSWindowingFullscreen |
             MacWSWindowingResize | MacWSWindowingSceneConstraints;
-        if (leafGridMethod)
+        if (denseGridPath)
             MacWSWindowingCapabilities |= MacWSWindowingDenseGrid;
-        if (initialMethod && leafGridMethod)
+        if (initialMethod && denseGridPath)
             MacWSWindowingCapabilities |= MacWSWindowingInitialSize;
         CFNotificationCenterAddObserver(
             center, NULL, MacWSPublishWindowingCapabilities,

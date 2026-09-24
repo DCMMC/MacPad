@@ -10,6 +10,7 @@ source_dir=/var/jb/usr
 target_dir=/var/mnt/rootfs/var/jb/usr
 parent_dir=/var/mnt/rootfs/var/jb
 mount_tool=/var/jb/usr/local/bin/mount_bindfs
+system_mount=/sbin/mount
 proxy_relative=macOS/Frameworks/Dock.framework/Versions/A/XPCServices/DockHelperProxy.xpc/DockHelperProxy
 
 [ -d "$source_dir" ] && [ -x "$source_dir/$proxy_relative" ] || {
@@ -20,9 +21,13 @@ proxy_relative=macOS/Frameworks/Dock.framework/Versions/A/XPCServices/DockHelper
 [ -d "$target_dir" ] || mkdir -p "$target_dir"
 canonical_target=$(realpath "$target_dir")
 canonical_parent=$(realpath "$parent_dir")
+[ -x "$system_mount" ] || {
+    echo "MacWS: system mount utility is unavailable: $system_mount" >&2
+    exit 1
+}
 
-if mount | grep -Fq "/var/jb/usr on $canonical_target (" ||
-   mount | grep -Fq "/var/jb on $canonical_parent ("; then
+if "$system_mount" | grep -Fq "/var/jb/usr on $canonical_target (" ||
+   "$system_mount" | grep -Fq "/var/jb on $canonical_parent ("; then
     [ -x "$target_dir/$proxy_relative" ] || {
         echo "MacWS: existing /var/jb bind does not expose the XPC proxy" >&2
         exit 1

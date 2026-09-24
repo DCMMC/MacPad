@@ -19,7 +19,21 @@ class BridgeCapabilities(unittest.TestCase):
         body = TWEAK.split('static void MacWSInstallRequestObservers(', 1)[1]
         self.assertLess(body.index('MacWSHandleInitialSizeRequest'),
                         body.index('MacWSPublishWindowingCapabilities(NULL'))
-        self.assertIn('if (initialMethod && leafGridMethod)', body)
+        self.assertIn('BOOL denseGridPath = leafGridMethod || ios16GridPath;', body)
+        self.assertIn('if (initialMethod && denseGridPath)', body)
+
+    def test_ios16_grid_capability_requires_the_real_legacy_entry_point(self):
+        self.assertIn(
+            '@"nearestGridSizeForProposedSize:inBounds:contentOrientation:'
+            'layoutRestrictionInfo:screenScale:chamoisLayoutAttributes:"',
+            TWEAK)
+        self.assertIn(
+            'BOOL ios16GridPath = ios16GridMethod && !countOnStageGridMethod;',
+            TWEAK)
+        self.assertIn(
+            'class_getInstanceMethod(object_getClass((id)self),\n'
+            '                                countOnStageSelector)',
+            TWEAK)
 
     def test_readiness_requires_live_publisher_identity(self):
         self.assertIn('MacWSWindowingStateSupports(state, required)', NOTIFY)
