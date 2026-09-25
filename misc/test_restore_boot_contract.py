@@ -34,7 +34,7 @@ class RestoreBootContract(unittest.TestCase):
             for line in CONTROL.splitlines() if line.startswith("Depends:"))
         self.assertEqual(
             {item.strip() for item in depends.split(",")},
-            {"gawk", "odcctools", "plutil"})
+            {"gawk", "odcctools", "plutil", "python3"})
 
 
 if __name__ == "__main__":
