@@ -40,6 +40,7 @@ PACKAGE_PATHS = (
     'var/jb/usr/macOS/gui-launchd/com.macwsguide.audiocomponentregistrar.plist',
     'var/jb/usr/macOS/gui-launchd/com.macwsguide.audio-output.plist',
     'var/jb/usr/macOS/lib/libmachook.dylib',
+    'var/jb/usr/macOS/lib/libmachook_arm64.dylib',
     'var/jb/Library/MobileSubstrate/DynamicLibraries/MTLCompilerBypassOSCheck.dylib',
     'var/jb/usr/macOS/gui-launchd/com.macwsguide.vscode.plist',
     'var/jb/usr/macOS/gui-launchd/com.macwsguide.geekbench.plist',

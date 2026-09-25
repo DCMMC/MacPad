@@ -78,6 +78,19 @@ after-stage::
 		$(THEOS_STAGING_DIR)/usr/macOS/bin/
 	@install -m 0755 misc/run_steam_live.sh \
 		$(THEOS_STAGING_DIR)/usr/macOS/bin/run_steam_live.sh
+	@fat="$(THEOS_STAGING_DIR)/usr/macOS/lib/libmachook.dylib"; \
+		arm64="$(THEOS_STAGING_DIR)/usr/macOS/lib/libmachook_arm64.dylib"; \
+		arm64e="$${fat}.arm64e-new"; \
+		if lipo -info "$$fat" 2>&1 | grep -q 'Architectures in the fat file'; then \
+			lipo "$$fat" -thin arm64 -output "$$arm64"; \
+			lipo "$$fat" -thin arm64e -output "$$arm64e"; \
+			chmod 0755 "$$arm64" "$$arm64e"; \
+			mv "$$arm64e" "$$fat"; \
+		elif [ ! -s "$$arm64" ]; then \
+			echo 'ERROR: staging requires both thin libmachook slices.' >&2; \
+			exit 1; \
+		fi
+	@echo '==> Staged thin arm64e + arm64 libmachook package payloads'
 
 # SpringBoard is arm64e and requires authenticated data fixups for Objective-C
 # and CF constant objects. The iPad's lld does not encode those fixups correctly

@@ -7,6 +7,8 @@ ROOT = Path(__file__).resolve().parents[1]
 BIND = (ROOT / "layout/usr/macOS/bin/ensure_jb_usr_bind.sh").read_text()
 AUTOSIGND = (ROOT / "layout/usr/macOS/bin/restart_autosignd.sh").read_text()
 CONTROL = (ROOT / "control").read_text()
+MAKEFILE = (ROOT / "Makefile").read_text()
+PACKAGE_POSTINST = (ROOT / "layout/DEBIAN/postinst").read_text()
 
 
 class RestoreBootContract(unittest.TestCase):
@@ -34,7 +36,26 @@ class RestoreBootContract(unittest.TestCase):
             for line in CONTROL.splitlines() if line.startswith("Depends:"))
         self.assertEqual(
             {item.strip() for item in depends.split(",")},
-            {"gawk", "odcctools", "plutil", "python3"})
+            {"gawk", "ldid", "odcctools", "plutil", "python3"})
+
+    def test_package_survives_dpkg_fat_macho_thinning(self):
+        self.assertIn(
+            'arm64="$(THEOS_STAGING_DIR)/usr/macOS/lib/libmachook_arm64.dylib"',
+            MAKEFILE)
+        self.assertIn('lipo "$$fat" -thin arm64 -output "$$arm64"', MAKEFILE)
+        self.assertIn('lipo "$$fat" -thin arm64e -output "$$arm64e"', MAKEFILE)
+        self.assertIn('elif [ -f "$LIBMACHOOK_ARM64" ]; then', PACKAGE_POSTINST)
+        self.assertIn(
+            '"$MACHO_PATCHER" "$LIBMACHOOK_ARM64" || exit 1',
+            PACKAGE_POSTINST)
+
+    def test_package_rejects_bootstraps_without_dynamic_trustcache_support(self):
+        self.assertIn(
+            'if [ ! -x /var/jb/usr/bin/jbctl ]; then',
+            PACKAGE_POSTINST)
+        self.assertIn(
+            'NathanLR cannot admit the macOS shared-cache closure',
+            PACKAGE_POSTINST)
 
 
 if __name__ == "__main__":

@@ -38,6 +38,18 @@ ANGLE_ASSET_SOURCE_DIR=/var/jb/usr/macOS/share/angle
 ANGLE_ASSET_TARGET_DIR="$ROOTFS/usr/local/share/macws/angle"
 SUBLIME_SETTINGS_TEMPLATE=/var/jb/usr/macOS/share/sublime/Preferences.sublime-settings
 
+# The chroot executes patched macOS dyld/shared-cache images whose fixed
+# CodeDirectories cannot be made admissible by CoreTrust-signing ordinary
+# Mach-O files.  A full jailbreak trustcache backend is therefore structural,
+# not an optional post-install accelerator.  Runtime-confirmed on iPad13,7
+# iPadOS 16.6 with NathanLR: the CoreTrust-signed loader, target and injected
+# dylib still die with SIGKILL, while AMFI selector 2 rejects an identically
+# entitled package helper with kIOReturnNotPermitted (0xe00002e2).
+if [ ! -x /var/jb/usr/bin/jbctl ]; then
+    echo 'macOS Host install failed: a full Dopamine-compatible jailbreak with /var/jb/usr/bin/jbctl is required; NathanLR cannot admit the macOS shared-cache closure.' >&2
+    exit 1
+fi
+
 # This is the dpkg maintainer entry point; build_on_ios deliberately does not
 # repeat the separate deep rootfs repair script. Audit the boot-scanned launch
 # authority here too, before publishing a new Host daemon or changing runtime.
@@ -129,6 +141,12 @@ if [ -f "$MACHO_PATCHER" ] && [ -f "$LIBMACHOOK" ]; then
         mv "$tmp_arm64e" "$LIBMACHOOK"
         mv "$tmp_arm64" "$LIBMACHOOK_ARM64"
         echo 'Split libmachook into thin arm64e + arm64 injection libraries.'
+    elif [ -f "$LIBMACHOOK_ARM64" ]; then
+        # Procursus dpkg on arm64e devices thins each fat Mach-O payload while
+        # unpacking it.  The package therefore stages a separate thin arm64
+        # companion which must receive the same macOS platform rewrite as the
+        # arm64e primary image before either slice is signed.
+        /var/jb/usr/bin/python3 "$MACHO_PATCHER" "$LIBMACHOOK_ARM64" || exit 1
     fi
     if [ ! -f "$LIBMACHOOK_ARM64" ]; then
         echo 'macOS Host install failed: thin arm64 libmachook is missing.' >&2
