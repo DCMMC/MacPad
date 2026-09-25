@@ -468,6 +468,15 @@ ensure_private_cfprefsd() {
     cf_temporary_root="$ROOTFS/private/var/.TemporaryItems"
     cf_temporary_user="$cf_temporary_root/folders.0"
     cf_temporary_leaf="$cf_temporary_user/TemporaryItems"
+    cf_temporary_mobile="$cf_temporary_root/folders.501"
+    cf_temporary_mobile_leaf="$cf_temporary_mobile/TemporaryItems"
+    cf_mobile_home="$ROOTFS/Users/mobile"
+    cf_mobile_library="$cf_mobile_home/Library"
+    cf_mobile_preferences="$cf_mobile_library/Preferences"
+    cf_mobile_user_root="$ROOTFS/var/folders/zz/macws_uid501"
+    cf_mobile_user_dir="$cf_mobile_user_root/0"
+    cf_mobile_cache_dir="$cf_mobile_user_root/C"
+    cf_mobile_temp_dir="$cf_mobile_user_root/T"
     cf_target_dir=${cf_target%/*}
     cf_needs_refresh=0
     cf_entitlements=''
@@ -481,11 +490,23 @@ ensure_private_cfprefsd() {
     # resolved these exact paths and modes; if any level is absent or has a
     # different mode, _CFPrefsTemporaryFDToWriteTo fails with ENOENT and the
     # daemon silently becomes non-persistent.
-    mkdir -p "$cf_temporary_leaf" || return 1
+    mkdir -p "$cf_temporary_leaf" "$cf_temporary_mobile_leaf" \
+        "$cf_mobile_preferences" "$cf_mobile_user_dir" \
+        "$cf_mobile_cache_dir" "$cf_mobile_temp_dir" || return 1
     chown root:wheel "$cf_temporary_root" "$cf_temporary_user" \
         "$cf_temporary_leaf" 2>/dev/null || true
+    chown 501:501 "$cf_temporary_mobile" "$cf_temporary_mobile_leaf" \
+        "$cf_mobile_home" "$cf_mobile_library" "$cf_mobile_preferences" \
+        "$cf_mobile_user_root" "$cf_mobile_user_dir" \
+        "$cf_mobile_cache_dir" "$cf_mobile_temp_dir" \
+        2>/dev/null || return 1
     chmod 1311 "$cf_temporary_root" || return 1
     chmod 0700 "$cf_temporary_user" "$cf_temporary_leaf" || return 1
+    chmod 0700 "$cf_temporary_mobile" "$cf_temporary_mobile_leaf" \
+        "$cf_mobile_preferences" || return 1
+    chmod 0755 "$cf_mobile_home" "$cf_mobile_library" || return 1
+    chmod 0700 "$cf_mobile_user_root" "$cf_mobile_user_dir" \
+        "$cf_mobile_cache_dir" "$cf_mobile_temp_dir" || return 1
 
     if [ ! -f "$cf_target" ]; then
         cf_needs_refresh=1

@@ -21,12 +21,18 @@ KEY_CODES = {
     "j": 38, "'": 39, "k": 40, ";": 41, "\\": 42, ",": 43,
     "/": 44, "n": 45, "m": 46, ".": 47, "tab": 48,
     "space": 49, "`": 50, "grave": 50, "backspace": 51, "escape": 53,
+    "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96,
+    "f6": 97, "f7": 98, "f8": 100, "f9": 101, "f10": 109,
+    "f11": 103, "f12": 111,
     "left": 123, "right": 124, "down": 125, "up": 126,
 }
 
 SPECIAL_SYMBOLS = {
     "return": 0xFF0D, "tab": 0xFF09, "backspace": 0xFF08,
     "escape": 0xFF1B, "space": ord(" "), "grave": ord("`"),
+    "f1": 0xF704, "f2": 0xF705, "f3": 0xF706, "f4": 0xF707,
+    "f5": 0xF708, "f6": 0xF709, "f7": 0xF70A, "f8": 0xF70B,
+    "f9": 0xF70C, "f10": 0xF70D, "f11": 0xF70E, "f12": 0xF70F,
     "left": 0xFF51, "up": 0xFF52, "right": 0xFF53, "down": 0xFF54,
 }
 

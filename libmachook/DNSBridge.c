@@ -168,8 +168,14 @@ int macws_getaddrinfo(const char *node, const char *service,
 
     int bridged = macws_bridge_getaddrinfo(node, service, hints, result);
     if (getenv("MACWS_DNS_DEBUG"))
-        fprintf(stderr, "#### DNS-BRIDGE node=%s local=%d bridged=%d\n",
-                node ?: "(null)", localError, bridged);
+        fprintf(stderr,
+                "#### DNS-BRIDGE node=%s service=%s flags=0x%x family=%d "
+                "socktype=%d protocol=%d local=%d bridged=%d\n",
+                node ?: "(null)", service ?: "(null)",
+                hints ? hints->ai_flags : 0,
+                hints ? hints->ai_family : AF_UNSPEC,
+                hints ? hints->ai_socktype : 0,
+                hints ? hints->ai_protocol : 0, localError, bridged);
     return bridged;
 }
 

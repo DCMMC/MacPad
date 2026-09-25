@@ -32,11 +32,22 @@
 // Reproduce the process contract atomically with posix_spawn. This avoids
 // inheriting initialized Network/XPC state; it does not skip an atfork handler
 // or claim that a failed child launch succeeded.
-typedef int (*MacWSCreateSimpleProcessFunction)(
+typedef int (*MacWSCreateSimpleProcessV3Function)(
     void *, int, const char *);
-static MacWSCreateSimpleProcessFunction gMacWSOriginalCreateSimpleProcess;
-static int MacWSSteamCreateSimpleProcess(void *commandOrArguments, int flags,
-                                         const char *workingDirectory);
+typedef int (*MacWSCreateSimpleProcessV4Function)(
+    void *, int, char *const *, const char *);
+typedef enum {
+    MacWSSteamCreateSimpleProcessUnsupported = 0,
+    MacWSSteamCreateSimpleProcessV3 = 3,
+    MacWSSteamCreateSimpleProcessV4 = 4,
+} MacWSSteamCreateSimpleProcessABI;
+static void *gMacWSOriginalCreateSimpleProcess;
+static MacWSSteamCreateSimpleProcessABI gMacWSCreateSimpleProcessABI;
+static int MacWSSteamCreateSimpleProcessV3Adapter(
+    void *commandOrArguments, int flags, const char *workingDirectory);
+static int MacWSSteamCreateSimpleProcessV4Adapter(
+    void *commandOrArguments, int flags, char *const *environment,
+    const char *workingDirectory);
 static bool MacWSPathEndsWith(const char *path, const char *suffix);
 static bool MacWSIsTopLevelSteamBrowser(void);
 static void MacWSInstallSteamApplicationLaunchCompatibility(void);
@@ -440,7 +451,20 @@ static void MacWSRebindSteamProcessImport(const struct mach_header *header,
                     // libtier0; any unsupported call in that interval must
                     // retain Valve's implementation.
                     if (!gMacWSOriginalCreateSimpleProcess) continue;
-                    replacement = (uintptr_t)MacWSSteamCreateSimpleProcess;
+                    if (gMacWSCreateSimpleProcessABI ==
+                            MacWSSteamCreateSimpleProcessV3) {
+                        replacement = (uintptr_t)
+                            MacWSSteamCreateSimpleProcessV3Adapter;
+                    } else if (gMacWSCreateSimpleProcessABI ==
+                                   MacWSSteamCreateSimpleProcessV4) {
+                        replacement = (uintptr_t)
+                            MacWSSteamCreateSimpleProcessV4Adapter;
+                    } else {
+                        // An updater changed a private Valve ABI. Leave its
+                        // original import intact until that exact image has
+                        // been disassembled and admitted above.
+                        continue;
+                    }
                 } else if ((exactSteamClient || exactSteamUI) &&
                            type == S_LAZY_SYMBOL_POINTERS &&
                            !strcmp(name, "_fork")) {
@@ -568,6 +592,20 @@ static NSURL *MacWSSteamRuntimeApplicationURL(NSString *applicationPath) {
         steamAppsPrefix.length];
     if (!relative.length || [relative hasPrefix:@"/"] ||
         [[relative pathComponents] containsObject:@".."]) return nil;
+
+    // RE-confirmed from the installed Steam app 251570 depot on iPad14,5:
+    // both 7dLauncher.app/Contents/MacOS/7dLauncher and the vendor
+    // 7DaysToDie.app Unity player are x86_64-only.  The separately prepared
+    // 2022.3.62f2 runtime bundle carries the arm64 Unity player while its Data,
+    // Resources, Mono and plug-in paths resolve back to the untouched depot.
+    // Preserve Steam/NSWorkspace as launch owner, but select that real arm64
+    // bundle instead of asking iPadOS to execute either unsupported x86_64
+    // entry point.  The ready marker and Info.plist checks below remain the
+    // authority for whether the runtime was actually prepared.
+    if ([relative isEqualToString:@"7 Days To Die/7dLauncher.app"] ||
+        [relative isEqualToString:@"7 Days To Die/7DaysToDie.app"]) {
+        relative = @"7 Days To Die/7DaysToDie-ARM.app";
+    }
     NSString *runtimePath = [runtimePrefix stringByAppendingPathComponent:
         relative];
     NSString *readyMarker = [[runtimePath stringByDeletingLastPathComponent]
@@ -607,6 +645,15 @@ static NSURL *MacWSSteamRuntimeApplicationURL(NSString *applicationPath) {
         }
     }
     return [NSURL fileURLWithPath:runtimePath isDirectory:YES];
+}
+
+static bool MacWSIsSevenDaysToDieARMRuntimeExecutable(
+        NSString *executablePath) {
+    if (![executablePath.lastPathComponent
+            isEqualToString:@"7 Days To Die"]) return false;
+    return [executablePath containsString:
+        @"/steamapps/macws-runtime/7 Days To Die/"
+         "7DaysToDie-ARM.app/Contents/MacOS/"];
 }
 
 static NSString *MacWSInsertLibraryForSteamExecutable(
@@ -745,6 +792,60 @@ static NSMutableDictionary *MacWSMergedEnvironmentForWorkspaceConfiguration(
             merged[@"MACWS_AGX_NATIVE"] = @"1";
             merged[@"MACWS_AGX_REGISTER_CLASSES"] = @"1";
             [merged removeObjectForKey:@"MACWS_PIN_FALLBACK"];
+            if (MacWSIsSevenDaysToDieARMRuntimeExecutable(executablePath)) {
+                // Runtime-confirmed with the exact arm64 Unity 2022.3.62f2
+                // player on iPad14,5: Mono reaches gameplay initialization
+                // through the page-granular W^X compatibility path, while the
+                // completed CAMetalDrawable IOSurface is the authoritative
+                // visible client area in MacWSHost.  Keep every switch scoped
+                // to this exact runtime bundle; Steam, Stray and the M1 desktop
+                // retain their existing launch contracts.
+                merged[@"MACWS_MONO_JIT_COMPAT"] = @"1";
+                merged[@"MACWS_JIT_MPROTECT_COMPAT"] = @"1";
+                merged[@"MACWS_JIT_FAULT_WRITE_COMPAT"] = @"1";
+                merged[@"MACWS_CATALYST_DIRECT_DRAWABLE"] = @"1";
+                // Unity's macOS AGX producer emits opcode zero for the same
+                // anchor-validated subtype-3 resource ABI family whose
+                // generic/native form uses opcode four. Keep zero admission
+                // scoped to this exact arm64 runtime; libmachook still
+                // validates the complete record and segment-list structure.
+                merged[@"MACWS_AGX_OPCODE_ZERO_COMPAT"] = @"1";
+                // The iPad fullscreen scene is 1366x1024 logical points at a
+                // 2x backing scale. Rendering this exact game at one backing
+                // pixel per logical point keeps its fullscreen aspect and
+                // leaves the final scale to MacWSHost's native Metal
+                // compositor. Metal_hooks validates the exact executable
+                // again before applying the public CAMetalLayer size policy.
+                merged[@"MACWS_7DTD_RENDER_SCALE_COMPAT"] = @"1";
+                merged[@"MACWS_STRAY_TARGET_FPS"] = @"60";
+                // Steam owns this child as uid 501.  The Ventura rootfs has
+                // no matching account record, so route it to the dedicated
+                // real cfprefsd login agent and synthetic /Users/mobile home.
+                // This restores Unity PlayerPrefs persistence; no preference
+                // value or EULA state is synthesized here.
+                merged[@"MACWS_SYNTHETIC_MOBILE_USER"] = @"1";
+                if (![merged[@"SteamAppId"] isKindOfClass:[NSString class]])
+                    merged[@"SteamAppId"] = @"251570";
+                if (![merged[@"SteamGameId"] isKindOfClass:[NSString class]])
+                    merged[@"SteamGameId"] = @"251570";
+                fprintf(stderr,
+                    "[MacWSSteamProcess] 7DTD arm64 environment "
+                    "agx=%s monoJIT=%s directDrawable=%s targetFPS=%s "
+                    "opcodeZero=%s renderScale=%s steamAppId=%s "
+                    "insertLibraries=%lu\n",
+                    [merged[@"MACWS_AGX_NATIVE"] UTF8String] ?: "(nil)",
+                    [merged[@"MACWS_MONO_JIT_COMPAT"] UTF8String] ?: "(nil)",
+                    [merged[@"MACWS_CATALYST_DIRECT_DRAWABLE"] UTF8String]
+                        ?: "(nil)",
+                    [merged[@"MACWS_STRAY_TARGET_FPS"] UTF8String] ?: "(nil)",
+                    [merged[@"MACWS_AGX_OPCODE_ZERO_COMPAT"] UTF8String]
+                        ?: "(nil)",
+                    [merged[@"MACWS_7DTD_RENDER_SCALE_COMPAT"] UTF8String]
+                        ?: "(nil)",
+                    [merged[@"SteamAppId"] UTF8String] ?: "(nil)",
+                    (unsigned long)insertLibraries.count);
+                fflush(stderr);
+            }
             // Stray's macOS 13 AGX command records have producer-version ABI
             // fields that differ from iOS 16's native consumer.  Keep the
             // exact, anchor-validated adapters game-scoped; Steam itself and
@@ -1422,8 +1523,26 @@ static char **MacWSArgumentsByAddingSteamBrowserPolicy(
     return result;
 }
 
-static int MacWSSteamCreateSimpleProcess(void *commandOrArguments, int flags,
-                                         const char *workingDirectory) {
+static int MacWSCallOriginalCreateSimpleProcess(
+        void *commandOrArguments, int flags, char *const *environment,
+        const char *workingDirectory) {
+    if (!gMacWSOriginalCreateSimpleProcess) return 0;
+    if (gMacWSCreateSimpleProcessABI == MacWSSteamCreateSimpleProcessV4) {
+        return ((MacWSCreateSimpleProcessV4Function)
+            gMacWSOriginalCreateSimpleProcess)(
+                commandOrArguments, flags, environment, workingDirectory);
+    }
+    if (gMacWSCreateSimpleProcessABI == MacWSSteamCreateSimpleProcessV3) {
+        return ((MacWSCreateSimpleProcessV3Function)
+            gMacWSOriginalCreateSimpleProcess)(
+                commandOrArguments, flags, workingDirectory);
+    }
+    return 0;
+}
+
+static int MacWSSteamCreateSimpleProcessShared(
+        void *commandOrArguments, int flags, char *const *environment,
+        const char *workingDirectory) {
     bool diagnostics = getenv("MACWS_STEAM_PROCESS_DIAGNOSTICS") != NULL;
     if (diagnostics) {
         fprintf(stderr,
@@ -1435,9 +1554,8 @@ static int MacWSSteamCreateSimpleProcess(void *commandOrArguments, int flags,
         fflush(stderr);
     }
     if (getenv("MACWS_STEAM_PROCESS_TRACE_ONLY")) {
-        return gMacWSOriginalCreateSimpleProcess ?
-            gMacWSOriginalCreateSimpleProcess(
-                commandOrArguments, flags, workingDirectory) : 0;
+        return MacWSCallOriginalCreateSimpleProcess(
+            commandOrArguments, flags, environment, workingDirectory);
     }
     if (!MacWSIsSteamProcess() || (flags & 0x20) ||
         !(flags & (0x04 | 0x08 | 0x10))) {
@@ -1447,9 +1565,8 @@ static int MacWSSteamCreateSimpleProcess(void *commandOrArguments, int flags,
                     "flags=%#x\n", flags);
             fflush(stderr);
         }
-        return gMacWSOriginalCreateSimpleProcess ?
-            gMacWSOriginalCreateSimpleProcess(
-                commandOrArguments, flags, workingDirectory) : 0;
+        return MacWSCallOriginalCreateSimpleProcess(
+            commandOrArguments, flags, environment, workingDirectory);
     }
 
     char *shellArguments[4] = {0};
@@ -1571,12 +1688,15 @@ static int MacWSSteamCreateSimpleProcess(void *commandOrArguments, int flags,
 
     pid_t child = 0;
     extern char **environ;
+    char *const *spawnEnvironment = environment ? environment : environ;
     if (result == 0) {
         result = searchPath ?
             posix_spawnp(&child, executable, &actions, &attributes,
-                         (char *const *)arguments, environ) :
+                         (char *const *)arguments,
+                         (char *const *)spawnEnvironment) :
             posix_spawn(&child, executable, &actions, &attributes,
-                        (char *const *)arguments, environ);
+                        (char *const *)arguments,
+                        (char *const *)spawnEnvironment);
     }
 
     posix_spawnattr_destroy(&attributes);
@@ -1608,6 +1728,20 @@ static int MacWSSteamCreateSimpleProcess(void *commandOrArguments, int flags,
     return child;
 }
 
+static int MacWSSteamCreateSimpleProcessV3Adapter(
+        void *commandOrArguments, int flags,
+        const char *workingDirectory) {
+    return MacWSSteamCreateSimpleProcessShared(
+        commandOrArguments, flags, NULL, workingDirectory);
+}
+
+static int MacWSSteamCreateSimpleProcessV4Adapter(
+        void *commandOrArguments, int flags, char *const *environment,
+        const char *workingDirectory) {
+    return MacWSSteamCreateSimpleProcessShared(
+        commandOrArguments, flags, environment, workingDirectory);
+}
+
 static void MacWSSteamProcessImageLoaded(const struct mach_header *header,
                                          intptr_t slide) {
     if (!MacWSIsSteamProcess()) return;
@@ -1618,19 +1752,48 @@ static void MacWSSteamProcessImageLoaded(const struct mach_header *header,
     if (dladdr(header, &image) && image.dli_fname &&
         strstr(image.dli_fname, "/libtier0_s.dylib")) {
         gMacWSOriginalCreateSimpleProcess =
-            (MacWSCreateSimpleProcessFunction)MSFindSymbol(
-                (MSImageRef)header, "_CreateSimpleProcess");
+            MSFindSymbol((MSImageRef)header, "_CreateSimpleProcess");
+        uintptr_t implementationOffset = gMacWSOriginalCreateSimpleProcess ?
+            (uintptr_t)gMacWSOriginalCreateSimpleProcess -
+                (uintptr_t)header : 0;
+        // RE-confirmed from the two admitted libtier0_s arm64 images:
+        //
+        // 1785799196 +0xd91c accepts x0=argv, x1=flags, x2=cwd.
+        // 1788652215 UUID 54365CF9-4CDD-3F42-94B9-5AAE7279DB41
+        // +0xbd1c saves x2 as an environment vector and x3 as cwd, then the
+        // child stores x2 into _environ before chdir(x3).  The matching
+        // chromehtml call at +0x69648..+0x69658 loads all four registers.
+        static const uint8_t tier0Build1788652215UUID[16] = {
+            0x54, 0x36, 0x5c, 0xf9, 0x4c, 0xdd, 0x3f, 0x42,
+            0x94, 0xb9, 0x5a, 0xae, 0x72, 0x79, 0xdb, 0x41,
+        };
+        if (implementationOffset == 0xd91c) {
+            gMacWSCreateSimpleProcessABI = MacWSSteamCreateSimpleProcessV3;
+        } else if (implementationOffset == 0xbd1c &&
+                   MacWSHeaderHasUUID(
+                       (const struct mach_header_64 *)header,
+                       tier0Build1788652215UUID)) {
+            gMacWSCreateSimpleProcessABI = MacWSSteamCreateSimpleProcessV4;
+        } else {
+            gMacWSCreateSimpleProcessABI =
+                MacWSSteamCreateSimpleProcessUnsupported;
+        }
         if (getenv("MACWS_STEAM_PROCESS_DIAGNOSTICS")) {
             fprintf(stderr,
                     "[MacWSSteamProcess] resolved Valve implementation=%p "
-                    "image=%s\n",
-                    gMacWSOriginalCreateSimpleProcess, image.dli_fname);
+                    "offset=%#lx abi=%u image=%s\n",
+                    gMacWSOriginalCreateSimpleProcess,
+                    (unsigned long)implementationOffset,
+                    (unsigned)gMacWSCreateSimpleProcessABI,
+                    image.dli_fname);
             fflush(stderr);
         }
         // libtier0 may load after steamui. Revisit every already-mapped image
         // now that both sides of the adapter are valid; future images continue
         // through the normal add-image callback below.
-        if (gMacWSOriginalCreateSimpleProcess) {
+        if (gMacWSOriginalCreateSimpleProcess &&
+            gMacWSCreateSimpleProcessABI !=
+                MacWSSteamCreateSimpleProcessUnsupported) {
             for (uint32_t index = 0; index < _dyld_image_count(); index++) {
                 MacWSRebindSteamProcessImport(
                     _dyld_get_image_header(index),

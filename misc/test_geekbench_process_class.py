@@ -13,8 +13,13 @@ class GeekbenchProcessClassContractTests(unittest.TestCase):
             '"/Applications/Geekbench 6.app/Contents/MacOS/Geekbench 6"',
             HOSTD_SOURCE,
         )
+        # Geekbench now enters its exact dedicated launchd job before the
+        # generic root-executable launcher selects the AppKit process class.
+        # Keep the regression at that real boundary instead of asserting the
+        # retired inline exception spelling.
         self.assertIn(
-            "![rootPath isEqualToString:@(kGeekbenchExecutable)]",
+            "if ([rootPath isEqualToString:@(kGeekbenchExecutable)])\n"
+            "        return LaunchGeekbench(message);",
             HOSTD_SOURCE,
         )
 

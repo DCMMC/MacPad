@@ -67,6 +67,7 @@ typedef bool BOOL;
 #define NO false
 static _Atomic unsigned g_macws_multisegment_log_batches;
 static bool macws_stray_agx_compat_enabled(void) { return false; }
+static bool macws_agx_opcode_zero_compat_enabled(void) { return false; }
 static bool macws_runtime_diagnostics_enabled(void) { return false; }
 static bool macws_kcmd_stray_subtype3_diag_enabled(void) { return false; }
 static bool macws_kcmd_field_4d0_diag_enabled(void) { return false; }

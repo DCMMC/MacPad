@@ -654,6 +654,15 @@ ensure_private_cfprefsd_and_trustcache() {
     local temporary_root='/var/mnt/rootfs/private/var/.TemporaryItems'
     local temporary_user="$temporary_root/folders.0"
     local temporary_leaf="$temporary_user/TemporaryItems"
+    local temporary_mobile="$temporary_root/folders.501"
+    local temporary_mobile_leaf="$temporary_mobile/TemporaryItems"
+    local mobile_home='/var/mnt/rootfs/Users/mobile'
+    local mobile_library="$mobile_home/Library"
+    local mobile_preferences="$mobile_library/Preferences"
+    local mobile_user_root='/var/mnt/rootfs/var/folders/zz/macws_uid501'
+    local mobile_user_dir="$mobile_user_root/0"
+    local mobile_cache_dir="$mobile_user_root/C"
+    local mobile_temp_dir="$mobile_user_root/T"
     local target_dir temporary needs_refresh=0 entitlements=''
 
     [ -f "$source_path" ] || return 1
@@ -668,11 +677,23 @@ ensure_private_cfprefsd_and_trustcache() {
     # rejects/misses it unless the modes are 01311, 0700, 0700 respectively.
     # Without it _CFPrefsTemporaryFDToWriteTo returns -1/ENOENT after the
     # target plist itself has already opened successfully.
-    mkdir -p "$temporary_leaf" || return 1
+    mkdir -p "$temporary_leaf" "$temporary_mobile_leaf" \
+        "$mobile_preferences" "$mobile_user_dir" "$mobile_cache_dir" \
+        "$mobile_temp_dir" || return 1
     chown root:wheel "$temporary_root" "$temporary_user" "$temporary_leaf" \
         2>/dev/null || true
+    chown 501:501 "$temporary_mobile" "$temporary_mobile_leaf" \
+        "$mobile_home" "$mobile_library" "$mobile_preferences" \
+        "$mobile_user_root" "$mobile_user_dir" "$mobile_cache_dir" \
+        "$mobile_temp_dir" \
+        2>/dev/null || return 1
     chmod 1311 "$temporary_root" || return 1
     chmod 0700 "$temporary_user" "$temporary_leaf" || return 1
+    chmod 0700 "$temporary_mobile" "$temporary_mobile_leaf" \
+        "$mobile_preferences" || return 1
+    chmod 0755 "$mobile_home" "$mobile_library" || return 1
+    chmod 0700 "$mobile_user_root" "$mobile_user_dir" \
+        "$mobile_cache_dir" "$mobile_temp_dir" || return 1
 
     if [ ! -f "$target_path" ]; then
         needs_refresh=1

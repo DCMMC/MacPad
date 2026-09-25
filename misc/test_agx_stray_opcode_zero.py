@@ -94,7 +94,11 @@ typedef bool BOOL;
 #define MACWS_AGX_SEGMENT_LIST_MAX_RECORDS 1024u
 static _Atomic unsigned g_macws_multisegment_log_batches;
 static bool stray;
+static bool opcode_zero_compat;
 static bool macws_stray_agx_compat_enabled(void) { return stray; }
+static bool macws_agx_opcode_zero_compat_enabled(void) {
+    return opcode_zero_compat;
+}
 static bool macws_runtime_diagnostics_enabled(void) { return false; }
 static bool macws_kcmd_stray_subtype3_diag_enabled(void) { return false; }
 static bool macws_submit_bytes_are_zero(const unsigned char *p, size_t n) {
@@ -103,8 +107,10 @@ static bool macws_submit_bytes_are_zero(const unsigned char *p, size_t n) {
 static void macws_subtype1_semantic_field_diagnostic(unsigned a, unsigned b, unsigned char *p) {}
 ''' + source[begin:end] + '''
 unsigned translate(unsigned char *commands, size_t *length,
-                   unsigned char *list, size_t *list_length, bool is_stray) {
+                   unsigned char *list, size_t *list_length, bool is_stray,
+                   bool enable_opcode_zero_compat) {
     stray = is_stray;
+    opcode_zero_compat = enable_opcode_zero_compat;
     return macws_translate_agx_segment_list_records(0, commands, length, list, list_length);
 }
 '''
@@ -114,17 +120,19 @@ unsigned translate(unsigned char *commands, size_t *length,
                        input=unit.encode(), check=True)
         cls.lib = ctypes.CDLL(str(library))
         cls.lib.translate.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
-                                     ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t), ctypes.c_bool]
+                                     ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+                                     ctypes.c_bool, ctypes.c_bool]
         cls.lib.translate.restype = ctypes.c_uint
 
     @classmethod
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def translate(self, commands, segments, stray=True):
+    def translate(self, commands, segments, stray=True, opcode_zero=False):
         a, b = ctypes.create_string_buffer(bytes(commands)), ctypes.create_string_buffer(bytes(segments))
         n, z = ctypes.c_size_t(len(commands)), ctypes.c_size_t(len(segments))
-        fixed = self.lib.translate(a, ctypes.byref(n), b, ctypes.byref(z), stray)
+        fixed = self.lib.translate(a, ctypes.byref(n), b, ctypes.byref(z),
+                                   stray, opcode_zero)
         return fixed, a.raw[:n.value], b.raw[:z.value]
 
     def test_exact_seven_record_capture_preserves_opaque_bytes_and_ranges(self):
@@ -139,6 +147,14 @@ unsigned translate(unsigned char *commands, size_t *length,
     def test_non_stray_opcode_zero_unchanged(self):
         commands, segments = fixture()
         self.assertEqual(self.translate(commands, segments, False), (0, commands, segments))
+
+    def test_exact_game_scope_admits_opcode_zero(self):
+        commands, segments = fixture()
+        expected, expected_list = expected_output(commands, segments, 2)
+        self.assertEqual(
+            self.translate(commands, segments, False, True),
+            (1, expected, expected_list),
+        )
 
     def test_opcode_four_remains_generic(self):
         commands, segments = fixture()
@@ -189,6 +205,10 @@ unsigned translate(unsigned char *commands, size_t *length,
         expected, expected_list = expected_output(command, single, 0)
         self.assertEqual(self.translate(command, single), (1, expected, expected_list))
         self.assertEqual(self.translate(command, single, False), (0, command, single))
+        self.assertEqual(
+            self.translate(command, single, False, True),
+            (1, expected, expected_list),
+        )
         struct.pack_into('<I', command, 8, 4)
         expected, expected_list = expected_output(command, single, 0)
         self.assertEqual(self.translate(command, single, False), (1, expected, expected_list))

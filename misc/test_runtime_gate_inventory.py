@@ -86,6 +86,14 @@ echo "$MACWS_LOCAL_OUTPUT"
         self.assertNotIn('MACWS_AUDIO_RENDER_BRIDGE',
                          job.get('EnvironmentVariables', {}))
 
+    def test_m2_software_audio_cadence_excludes_callback_work(self):
+        bridge = (ROOT / 'libmachook/AudioRenderBridge.m').read_text()
+        self.assertIn('strcmp(machine, "iPad14,5") == 0;', bridge)
+        self.assertIn('nextDeadline += quantumTicks;', bridge)
+        self.assertIn('remainingTicks = nextDeadline - now;', bridge)
+        self.assertIn('now - nextDeadline > quantumTicks * 8', bridge)
+        self.assertNotIn('(void)nanosleep(&quantum, NULL);', bridge)
+
     def test_native_video_production_policies_do_not_require_opt_in(self):
         hooks = (ROOT / 'libmachook/mac_hooks.m').read_text()
         metal = (ROOT / 'libmachook/Metal_hooks.x').read_text()

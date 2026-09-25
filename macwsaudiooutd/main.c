@@ -21,9 +21,11 @@ typedef struct {
     uint64_t observedCallbackCount;
     uint64_t observedCallbackMachTime;
     uint64_t pendingStartFrame;
+    uint64_t queueCallbackCount;
     int16_t lastSample[MACWS_AUDIO_CHANNELS];
     bool pendingStart;
     bool recoveringFromUnderrun;
+    bool reportedQueueCallback;
     AudioQueueRef queue;
     bool acceptingCallbacks;
 } OutputState;
@@ -117,6 +119,7 @@ static void CopyFrames(OutputState *state, int16_t *destination,
 static void OutputCallback(void *context, AudioQueueRef queue,
                            AudioQueueBufferRef buffer) {
     OutputState *state = context;
+    __atomic_add_fetch(&state->queueCallbackCount, 1, __ATOMIC_RELAXED);
     uint32_t frameBytes =
         MACWS_AUDIO_CHANNELS * MACWS_AUDIO_BYTES_PER_SAMPLE;
     uint32_t frames = buffer->mAudioDataBytesCapacity / frameBytes;
@@ -158,23 +161,43 @@ static OSStatus StartOutput(OutputState *state) {
 
     OSStatus status = AudioQueueNewOutput(&format, OutputCallback, state, NULL,
                                           NULL, 0, &state->queue);
-    if (status != noErr) return status;
+    if (status != noErr) {
+        dprintf(STDERR_FILENO,
+                "macwsaudiooutd: AudioQueueNewOutput status=%d\n",
+                (int)status);
+        return status;
+    }
     uint64_t writer = __atomic_load_n(
         &state->header->writeFrame, __ATOMIC_ACQUIRE);
     state->readFrame = writer > MACWS_AUDIO_OUTPUT_PREROLL_FRAMES
         ? writer - MACWS_AUDIO_OUTPUT_PREROLL_FRAMES : 0;
     memset(state->lastSample, 0, sizeof(state->lastSample));
     state->recoveringFromUnderrun = false;
+    __atomic_store_n(&state->queueCallbackCount, 0, __ATOMIC_RELAXED);
+    state->reportedQueueCallback = false;
     state->acceptingCallbacks = true;
     const UInt32 framesPerBuffer = 960;
     const UInt32 bytes = framesPerBuffer * format.mBytesPerFrame;
     for (unsigned index = 0; index < 3; index++) {
         AudioQueueBufferRef buffer = NULL;
         status = AudioQueueAllocateBuffer(state->queue, bytes, &buffer);
-        if (status != noErr || !buffer) break;
+        if (status != noErr || !buffer) {
+            dprintf(STDERR_FILENO,
+                    "macwsaudiooutd: AudioQueueAllocateBuffer[%u] "
+                    "status=%d buffer=%p\n",
+                    index, (int)status, buffer);
+            break;
+        }
         OutputCallback(state, state->queue, buffer);
     }
-    if (status == noErr) status = AudioQueueStart(state->queue, NULL);
+    if (status == noErr) {
+        status = AudioQueueStart(state->queue, NULL);
+        if (status != noErr) {
+            dprintf(STDERR_FILENO,
+                    "macwsaudiooutd: AudioQueueStart status=%d\n",
+                    (int)status);
+        }
+    }
     if (status != noErr) {
         state->acceptingCallbacks = false;
         AudioQueueDispose(state->queue, true);
@@ -193,14 +216,24 @@ static void StopOutput(OutputState *state) {
 
 static bool MapRing(OutputState *state) {
     int descriptor = open(MACWS_AUDIO_RING_IOS_PATH,
-                          O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+                          O_CREAT | O_RDWR | O_CLOEXEC, 0660);
     if (descriptor < 0) return false;
+    // macOS GUI applications launched for the login user run as uid/gid 501,
+    // while this native iOS output job is installed from the root bootstrap.
+    // Runtime-confirmed on iPad14,5: the old 0600 root:wheel ring made the
+    // real uid-501 DefaultOutput probe fail at open(2) with EACCES before any
+    // render callback could publish. Keep the transport private to root and
+    // the login user; do not make the PCM ring world-writable.
+    if (fchown(descriptor, 501, 501) != 0 ||
+        fchmod(descriptor, 0660) != 0) {
+        close(descriptor);
+        return false;
+    }
     uint64_t bytes = RingMappingBytes();
     if (ftruncate(descriptor, (off_t)bytes) != 0) {
         close(descriptor);
         return false;
     }
-    (void)fchmod(descriptor, 0600);
     void *mapping = mmap(NULL, (size_t)bytes, PROT_READ | PROT_WRITE, MAP_SHARED,
                          descriptor, 0);
     close(descriptor);
@@ -306,6 +339,20 @@ int main(void) {
             dprintf(STDERR_FILENO, "macwsaudiooutd: output idle\n");
         } else if (!recentAudio) {
             state.pendingStart = false;
+        }
+        uint64_t queueCallbacks = __atomic_load_n(
+            &state.queueCallbackCount, __ATOMIC_RELAXED);
+        if (state.queue && !state.reportedQueueCallback &&
+            queueCallbacks > 3) {
+            // StartOutput fills exactly three buffers synchronously.  A fourth
+            // invocation can therefore only come from AudioQueue's native
+            // output thread after AudioQueueStart succeeded.
+            state.reportedQueueCallback = true;
+            dprintf(STDERR_FILENO,
+                    "macwsaudiooutd: runtime-confirmed hardware callback "
+                    "count=%llu read-frame=%llu\n",
+                    (unsigned long long)queueCallbacks,
+                    (unsigned long long)state.readFrame);
         }
         // AudioQueue owns the active render cadence. This control loop only
         // notices transitions between silence and playback, so 50 ms keeps

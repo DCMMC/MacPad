@@ -12,6 +12,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
+#import <execinfo.h>
 #import <math.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
@@ -112,6 +113,7 @@ typedef id (*MacWSEventFromCGEvent)(id, SEL, MacWSCGEventRef);
 typedef const void *(*MacWSEventRef)(id, SEL);
 typedef void (*MacWSPostEvent)(id, SEL, id, BOOL);
 typedef void (*MacWSSendEvent)(id, SEL, id);
+typedef BOOL (*MacWSUnityDidSendEvent)(id, SEL, id);
 typedef id (*MacWSNextEvent)(id, SEL, NSUInteger, id, id, BOOL);
 typedef void (*MacWSHandleApplicationEvent)(id, SEL, id);
 typedef void (*MacWSMenuEventLoop)(id, SEL, BOOL, id);
@@ -133,6 +135,7 @@ static id MacWSWindowGeometryObserverInstance;
 static BOOL MacWSWindowMetricsEventPublishPending;
 static char MacWSWindowConfigureAckKey;
 static void MacWSPublishWindowMetrics(void);
+static void MacWSEnqueueAppInputRecord(MacWSInputRecord record);
 extern void MacWSInstallPreviewCoreImageRendererAdapter(void);
 static void MacWSNotifyDisplayCatalogChanged(uint8_t reason);
 static void MacWSNotifyDisplayGeometryChanged(uint32_t windowID, id window,
@@ -144,6 +147,7 @@ static void MacWSMarkProcessLocalMouseEvent(id event);
 static BOOL MacWSIsProcessLocalMouseEvent(id event);
 static BOOL MacWSMainBundleUsesFullscreenCanvasPresentation(void);
 static void MacWSInstallFullscreenTransitionPrerequisite(void);
+static void MacWSLogUnityNGUIInputState(const char *phase);
 static BOOL MacWSWindowPresentationIsOnScreen(id window,
                                               BOOL *knownOut);
 static id MacWSPresentingWindow(id window, id application);
@@ -211,9 +215,15 @@ static MacWSPressedMouseButtons MacWSOriginalPressedMouseButtons;
 static MacWSMouseLocation MacWSOriginalMouseLocation;
 // Main-thread scoped. AppKit's menu-bar tracker ignores the passed NSEvent's
 // location while updating its tracked controller and consults this class
-// property instead. Keep the override live only for that one handler call.
+// property instead. The transient value remains scoped to that one handler
+// call. The persistent value models WindowServer's last cursor position after
+// an exact process-local event: those events cannot update the real global
+// cursor, but later AppKit/game-engine polling must still observe the last
+// delivered position just as it would after a hardware CGEvent.
 static BOOL MacWSAppInputMouseLocationActive;
 static CGPoint MacWSAppInputMouseLocation;
+static BOOL MacWSAppInputPersistentMouseLocationValid;
+static CGPoint MacWSAppInputPersistentMouseLocation;
 typedef struct {
     BOOL accepting;
     uint32_t contactID;
@@ -329,12 +339,16 @@ static BOOL MacWSRuntimeDiagnosticsEnabled(void) {
     return value != 0;
 }
 
-// UE4's Mac input backend samples key state from AppKit's event queue on its
-// game tick.  Runtime evidence from Stray's first-run brightness screen is
-// exact: direct -[NSApplication sendEvent:] delivered Return to the real
-// FCocoaWindow in 4.6 ms and switched the displayed input glyph, but the
-// Accept action never observed a down state.  Queueing the same ordinary
-// NSEvent lets the application's normal event pump establish that state
+// Game input backends sample key state from AppKit's event queue on their game
+// tick.  Runtime evidence from Stray's first-run brightness screen is exact:
+// direct -[NSApplication sendEvent:] delivered Return to the real FCocoaWindow
+// in 4.6 ms and switched the displayed input glyph, but the Accept action never
+// observed a down state.  Unity 2022.3.62f2 has the same event-pump boundary:
+// RE-confirmed in the shipped arm64 UnityPlayer.dylib, -[PlayerWindowView
+// keyDown:] calls -[PlayerAppDelegate DidSendEvent:], and the runtime Player.log
+// showed direct Return down/up reaching PlayerWindowView back-to-back without
+// advancing 7 Days To Die's selected action.  Queueing the same ordinary
+// NSEvent lets each application's normal event pump establish that state
 // before a later key-up; no selector, action, or validation result is forged.
 static BOOL MacWSMainBundleUsesQueuedGameInput(void) {
     static _Atomic int cached = -1;
@@ -348,7 +362,21 @@ static BOOL MacWSMainBundleUsesQueuedGameInput(void) {
         // through the target process's realized NSString class, like every
         // other bundle-identity check in this bridge.
         value = [identifier isEqualToString:
-            MacWSRuntimeString("com.annapurnainteractive.Stray")];
+                    MacWSRuntimeString("com.annapurnainteractive.Stray")] ||
+            [identifier isEqualToString:
+                MacWSRuntimeString("com.The-Fun-Pimps.7-Days-To-Die")];
+        atomic_store_explicit(&cached, value, memory_order_release);
+    }
+    return value != 0;
+}
+
+static BOOL MacWSMainBundleIsSevenDaysToDie(void) {
+    static _Atomic int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_acquire);
+    if (value < 0) {
+        NSString *identifier = [[NSBundle mainBundle] bundleIdentifier];
+        value = [identifier isEqualToString:
+            MacWSRuntimeString("com.The-Fun-Pimps.7-Days-To-Die")];
         atomic_store_explicit(&cached, value, memory_order_release);
     }
     return value != 0;
@@ -650,6 +678,9 @@ static CFTypeRef MacWSAppInputGestureHitView;
 static double MacWSAppInputGestureHitValueBefore;
 static BOOL MacWSAppInputGestureHitHasValue;
 static MacWSSendEvent MacWSOriginalApplicationSendEvent;
+static MacWSUnityDidSendEvent MacWSOriginalUnityDidSendEvent;
+static _Atomic uint64_t MacWSUnityMouseDiagnosticUntilMicros;
+static _Atomic uint64_t MacWSUnityMouseDiagnosticSequence;
 static MacWSHandleApplicationEvent MacWSOriginalHandleActivatedEvent;
 // A tagged second Host tap is posted through CGPostMouseEvent so Finder keeps
 // its real WindowServer target/activation state. That legacy API cannot encode
@@ -1277,13 +1308,373 @@ static id MacWSRestorePendingSystemDoubleClick(id event, NSUInteger type,
     return replacement;
 }
 
+// Diagnostic-only witness at the exact Unity 2022.3.62f2 event boundary.
+// The shipped arm64 UnityPlayer.dylib's -[PlayerWindowView mouseDown:] at
+// 0xf166b8 calls -[PlayerAppDelegate DidSendEvent:] before falling back to
+// AppKit. Record the real return value here; never replace it or alter the
+// event. This distinguishes an AppKit delivery failure from a rejection in
+// Unity's own event adapter without turning the adapter into an always-YES
+// symptom bypass.
+static BOOL MacWSUnityDidSendEventDiagnostic(id self, SEL command, id event) {
+    BOOL accepted = MacWSOriginalUnityDidSendEvent
+        ? MacWSOriginalUnityDidSendEvent(self, command, event) : NO;
+    NSUInteger type = event ? ((MacWSMsgUInteger)objc_msgSend)(
+        event, sel_registerName("type")) : 0;
+    NSInteger windowNumber = event ? ((MacWSMsgInteger)objc_msgSend)(
+        event, sel_registerName("windowNumber")) : 0;
+    CGPoint local = event ? ((MacWSMsgPoint)objc_msgSend)(
+        event, sel_registerName("locationInWindow")) : CGPointZero;
+    uint32_t currentWord = 0;
+    uint32_t downWord = 0;
+    uint32_t upWord = 0;
+    float managerX = NAN;
+    float managerY = NAN;
+    BOOL managerRead = NO;
+    // Exact diagnostic for the shipped UnityPlayer 2022.3.62f2 arm64 image
+    // (SHA-256 89ddca014c60f0a909e23fe87664f0c5ac70fe1889621a533c252cc8b6985e56).
+    // RE-confirmed: +0x462344 calls the global-manager lookup for index 1;
+    // +0x60/+0x80/+0xa0 are current/down/up bit-vector pointers and mouse
+    // button zero is key 0x143 (word 10, bit 3). +0xc8 is the sampled x/y.
+    // This block only reads those fields after Unity's real method returns.
+    Dl_info unityInfo = {0};
+    if (MacWSOriginalUnityDidSendEvent &&
+        dladdr((void *)MacWSOriginalUnityDidSendEvent, &unityInfo) &&
+        unityInfo.dli_fbase && unityInfo.dli_fname &&
+        strstr(unityInfo.dli_fname, "/UnityPlayer.dylib")) {
+        typedef void *(*MacWSUnityInputManagerGetter)(void);
+        MacWSUnityInputManagerGetter getter =
+            (MacWSUnityInputManagerGetter)((uintptr_t)unityInfo.dli_fbase +
+                                           0x462344u);
+        uint8_t *manager = (uint8_t *)getter();
+        if (manager) {
+            uint32_t *current = *(uint32_t **)(manager + 0x60);
+            uint32_t *down = *(uint32_t **)(manager + 0x80);
+            uint32_t *up = *(uint32_t **)(manager + 0xa0);
+            if (current && down && up) {
+                currentWord = current[10];
+                downWord = down[10];
+                upWord = up[10];
+                memcpy(&managerX, manager + 0xc8, sizeof(managerX));
+                memcpy(&managerY, manager + 0xcc, sizeof(managerY));
+                managerRead = YES;
+            }
+        }
+    }
+    fprintf(stderr,
+        "#### APP-INPUT UNITY-DID-SEND pid=%d type=%lu window=%ld "
+        "local=(%.2f,%.2f) result=%s manager=%s "
+        "button0(current/down/up)=%u/%u/%u mouse=(%.2f,%.2f)\n",
+        getpid(), (unsigned long)type, (long)windowNumber,
+        local.x, local.y, accepted ? "YES" : "NO",
+        managerRead ? "READ" : "UNAVAILABLE",
+        !!(currentWord & 8u), !!(downWord & 8u), !!(upWord & 8u),
+        managerX, managerY);
+    fflush(stderr);
+    if (type >= 1 && type <= 7) {
+        MacWSLogUnityNGUIInputState("did-send");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(0.05 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            MacWSLogUnityNGUIInputState("post-frame");
+        });
+    }
+    return accepted;
+}
+
+// Read-only managed witness for the NGUI input fork used by 7DTD.  NGUI.dll
+// UICamera::ProcessEvents (SHA-256
+// 414c386911bf52e8b246ec89d4fb0c5ff41b9e5c1c59069b617f193a60947f37)
+// is RE-confirmed to execute ProcessTouches exclusively when instance field
+// useTouch is true; ProcessMouse is reached only from the false branch.  The
+// Unity InputManager witness above proves the native mouse bits are populated,
+// so record the live branch selector and hit target before changing policy.
+// All Mono calls below are getters/field reads and remain diagnostic-only.
+static void MacWSLogUnityNGUIInputState(const char *phase) {
+    typedef void *(*MonoGetRootDomain)(void);
+    typedef void *(*MonoThreadAttach)(void *);
+    typedef void *(*MonoAssemblyNameNew)(const char *);
+    typedef void (*MonoAssemblyNameFree)(void *);
+    typedef void *(*MonoAssemblyLoaded)(void *);
+    typedef void *(*MonoAssemblyGetImage)(void *);
+    typedef void *(*MonoClassFromName)(void *, const char *, const char *);
+    typedef void *(*MonoClassGetMethodFromName)(void *, const char *, int);
+    typedef void *(*MonoClassGetFieldFromName)(void *, const char *);
+    typedef void *(*MonoRuntimeInvoke)(void *, void *, void **, void **);
+    typedef void (*MonoFieldGetValue)(void *, void *, void *);
+    typedef void *(*MonoClassVTable)(void *, void *);
+    typedef void (*MonoFieldStaticGetValue)(void *, void *, void *);
+    typedef void *(*MonoObjectUnbox)(void *);
+    typedef void *(*MonoObjectToString)(void *, void **);
+    typedef char *(*MonoStringToUTF8)(void *);
+    typedef void (*MonoFree)(void *);
+
+    static struct {
+        MonoGetRootDomain getRootDomain;
+        MonoThreadAttach threadAttach;
+        MonoAssemblyNameNew assemblyNameNew;
+        MonoAssemblyNameFree assemblyNameFree;
+        MonoAssemblyLoaded assemblyLoaded;
+        MonoAssemblyGetImage assemblyGetImage;
+        MonoClassFromName classFromName;
+        MonoClassGetMethodFromName classGetMethodFromName;
+        MonoClassGetFieldFromName classGetFieldFromName;
+        MonoRuntimeInvoke runtimeInvoke;
+        MonoFieldGetValue fieldGetValue;
+        MonoClassVTable classVTable;
+        MonoFieldStaticGetValue fieldStaticGetValue;
+        MonoObjectUnbox objectUnbox;
+        MonoObjectToString objectToString;
+        MonoStringToUTF8 stringToUTF8;
+        MonoFree monoFree;
+    } api;
+    static dispatch_once_t apiOnce;
+    dispatch_once(&apiOnce, ^{
+#define MACWS_MONO_RESOLVE(field, symbol) \
+        api.field = (typeof(api.field))dlsym(RTLD_DEFAULT, symbol)
+        MACWS_MONO_RESOLVE(getRootDomain, "mono_get_root_domain");
+        MACWS_MONO_RESOLVE(threadAttach, "mono_thread_attach");
+        MACWS_MONO_RESOLVE(assemblyNameNew, "mono_assembly_name_new");
+        MACWS_MONO_RESOLVE(assemblyNameFree, "mono_assembly_name_free");
+        MACWS_MONO_RESOLVE(assemblyLoaded, "mono_assembly_loaded");
+        MACWS_MONO_RESOLVE(assemblyGetImage, "mono_assembly_get_image");
+        MACWS_MONO_RESOLVE(classFromName, "mono_class_from_name");
+        MACWS_MONO_RESOLVE(classGetMethodFromName,
+                           "mono_class_get_method_from_name");
+        MACWS_MONO_RESOLVE(classGetFieldFromName,
+                           "mono_class_get_field_from_name");
+        MACWS_MONO_RESOLVE(runtimeInvoke, "mono_runtime_invoke");
+        MACWS_MONO_RESOLVE(fieldGetValue, "mono_field_get_value");
+        MACWS_MONO_RESOLVE(classVTable, "mono_class_vtable");
+        MACWS_MONO_RESOLVE(fieldStaticGetValue,
+                           "mono_field_static_get_value");
+        MACWS_MONO_RESOLVE(objectUnbox, "mono_object_unbox");
+        MACWS_MONO_RESOLVE(objectToString, "mono_object_to_string");
+        MACWS_MONO_RESOLVE(stringToUTF8, "mono_string_to_utf8");
+        MACWS_MONO_RESOLVE(monoFree, "mono_free");
+#undef MACWS_MONO_RESOLVE
+    });
+    if (!api.getRootDomain || !api.threadAttach || !api.assemblyNameNew ||
+        !api.assemblyNameFree || !api.assemblyLoaded ||
+        !api.assemblyGetImage || !api.classFromName ||
+        !api.classGetMethodFromName || !api.classGetFieldFromName ||
+        !api.runtimeInvoke || !api.fieldGetValue || !api.classVTable ||
+        !api.fieldStaticGetValue || !api.objectUnbox) {
+        fprintf(stderr,
+            "#### APP-INPUT UNITY-NGUI phase=%s state=MONO-API-UNAVAILABLE\n",
+            phase ? phase : "unknown");
+        fflush(stderr);
+        return;
+    }
+
+    void *domain = api.getRootDomain();
+    if (!domain) return;
+    (void)api.threadAttach(domain);
+    void *assemblyName = api.assemblyNameNew("NGUI");
+    void *assembly = assemblyName ? api.assemblyLoaded(assemblyName) : NULL;
+    if (assemblyName) api.assemblyNameFree(assemblyName);
+    void *image = assembly ? api.assemblyGetImage(assembly) : NULL;
+    void *klass = image ? api.classFromName(image, "", "UICamera") : NULL;
+    void *getFirst = klass
+        ? api.classGetMethodFromName(klass, "get_first", 0) : NULL;
+    void *exception = NULL;
+    void *camera = getFirst
+        ? api.runtimeInvoke(getFirst, NULL, NULL, &exception) : NULL;
+    uint8_t useTouch = 0;
+    uint8_t useMouse = 0;
+    uint8_t useKeyboard = 0;
+    if (camera && !exception) {
+        void *field = api.classGetFieldFromName(klass, "useTouch");
+        if (field) api.fieldGetValue(camera, field, &useTouch);
+        field = api.classGetFieldFromName(klass, "useMouse");
+        if (field) api.fieldGetValue(camera, field, &useMouse);
+        field = api.classGetFieldFromName(klass, "useKeyboard");
+        if (field) api.fieldGetValue(camera, field, &useKeyboard);
+    }
+
+    int32_t touchCount = -1;
+    int32_t currentScheme = -1;
+    void *getTouchCount = klass
+        ? api.classGetMethodFromName(klass, "get_touchCount", 0) : NULL;
+    exception = NULL;
+    void *boxed = getTouchCount
+        ? api.runtimeInvoke(getTouchCount, NULL, NULL, &exception) : NULL;
+    if (boxed && !exception)
+        memcpy(&touchCount, api.objectUnbox(boxed), sizeof(touchCount));
+    void *getCurrentScheme = klass
+        ? api.classGetMethodFromName(klass, "get_currentScheme", 0) : NULL;
+    exception = NULL;
+    boxed = getCurrentScheme
+        ? api.runtimeInvoke(getCurrentScheme, NULL, NULL, &exception) : NULL;
+    if (boxed && !exception)
+        memcpy(&currentScheme, api.objectUnbox(boxed), sizeof(currentScheme));
+
+    void *hover = NULL;
+    void *vtable = klass ? api.classVTable(domain, klass) : NULL;
+    void *hoverField = klass
+        ? api.classGetFieldFromName(klass, "mHover") : NULL;
+    if (vtable && hoverField)
+        api.fieldStaticGetValue(vtable, hoverField, &hover);
+    char *hoverText = NULL;
+    if (hover && api.objectToString && api.stringToUTF8) {
+        exception = NULL;
+        void *description = api.objectToString(hover, &exception);
+        if (description && !exception) hoverText = api.stringToUTF8(description);
+    }
+    fprintf(stderr,
+        "#### APP-INPUT UNITY-NGUI phase=%s camera=%p "
+        "useTouch=%u useMouse=%u useKeyboard=%u touchCount=%d "
+        "scheme=%d hover=%p hoverName=%s\n",
+        phase ? phase : "unknown", camera,
+        useTouch, useMouse, useKeyboard, touchCount, currentScheme,
+        hover, hoverText ? hoverText : "<nil>");
+    fflush(stderr);
+
+    // The loading overlay can remain visibly frozen even after the server
+    // reports PlayerSpawnedInWorld. Read the exact state that
+    // PlayerMoveController.updateRespawn drives: LocalPlayerUI.primaryUI ->
+    // GUIWindowManager.IsWindowOpen(XUiC_LoadingScreen.ID). Also record the
+    // underlying GUIWindow.isShowing and Unity Camera.enabled values. These
+    // are getter/field witnesses only; no managed action or visibility value
+    // is changed by this diagnostic.
+    void *gameName = api.assemblyNameNew("Assembly-CSharp");
+    void *gameAssembly = gameName ? api.assemblyLoaded(gameName) : NULL;
+    if (gameName) api.assemblyNameFree(gameName);
+    void *gameImage = gameAssembly
+        ? api.assemblyGetImage(gameAssembly) : NULL;
+    void *localPlayerClass = gameImage
+        ? api.classFromName(gameImage, "", "LocalPlayerUI") : NULL;
+    void *getPrimary = localPlayerClass
+        ? api.classGetMethodFromName(
+            localPlayerClass, "get_primaryUI", 0) : NULL;
+    exception = NULL;
+    void *primaryUI = getPrimary
+        ? api.runtimeInvoke(getPrimary, NULL, NULL, &exception) : NULL;
+    void *getWindowManager = localPlayerClass
+        ? api.classGetMethodFromName(
+            localPlayerClass, "get_windowManager", 0) : NULL;
+    exception = NULL;
+    void *windowManager = primaryUI && getWindowManager
+        ? api.runtimeInvoke(
+            getWindowManager, primaryUI, NULL, &exception) : NULL;
+    void *loadingClass = gameImage
+        ? api.classFromName(gameImage, "", "XUiC_LoadingScreen") : NULL;
+    void *loadingVTable = loadingClass
+        ? api.classVTable(domain, loadingClass) : NULL;
+    void *loadingIDField = loadingClass
+        ? api.classGetFieldFromName(loadingClass, "ID") : NULL;
+    void *loadingID = NULL;
+    if (loadingVTable && loadingIDField)
+        api.fieldStaticGetValue(loadingVTable, loadingIDField, &loadingID);
+    char *loadingIDText = loadingID && api.stringToUTF8
+        ? api.stringToUTF8(loadingID) : NULL;
+    void *windowManagerClass = gameImage
+        ? api.classFromName(gameImage, "", "GUIWindowManager") : NULL;
+    void *isWindowOpen = windowManagerClass
+        ? api.classGetMethodFromName(
+            windowManagerClass, "IsWindowOpen", 1) : NULL;
+    void *loadingWindow = NULL;
+    uint8_t loadingOpen = 0;
+    if (windowManager && loadingID && isWindowOpen) {
+        void *arguments[] = { loadingID };
+        exception = NULL;
+        boxed = api.runtimeInvoke(
+            isWindowOpen, windowManager, arguments, &exception);
+        if (boxed && !exception)
+            memcpy(&loadingOpen, api.objectUnbox(boxed),
+                   sizeof(loadingOpen));
+        void *getWindow = api.classGetMethodFromName(
+            windowManagerClass, "GetWindow", 1);
+        exception = NULL;
+        loadingWindow = getWindow
+            ? api.runtimeInvoke(
+                getWindow, windowManager, arguments, &exception) : NULL;
+    }
+    uint8_t loadingShowing = 0;
+    void *guiWindowClass = gameImage
+        ? api.classFromName(gameImage, "", "GUIWindow") : NULL;
+    void *isShowingField = guiWindowClass
+        ? api.classGetFieldFromName(guiWindowClass, "isShowing") : NULL;
+    if (loadingWindow && isShowingField)
+        api.fieldGetValue(loadingWindow, isShowingField, &loadingShowing);
+
+    void *getCamera = localPlayerClass
+        ? api.classGetMethodFromName(localPlayerClass, "get_camera", 0) : NULL;
+    exception = NULL;
+    void *playerCamera = primaryUI && getCamera
+        ? api.runtimeInvoke(getCamera, primaryUI, NULL, &exception) : NULL;
+    uint8_t cameraEnabled = 0;
+    BOOL cameraEnabledRead = NO;
+    void *coreName = api.assemblyNameNew("UnityEngine.CoreModule");
+    void *coreAssembly = coreName ? api.assemblyLoaded(coreName) : NULL;
+    if (coreName) api.assemblyNameFree(coreName);
+    void *coreImage = coreAssembly
+        ? api.assemblyGetImage(coreAssembly) : NULL;
+    void *behaviourClass = coreImage
+        ? api.classFromName(coreImage, "UnityEngine", "Behaviour") : NULL;
+    void *getEnabled = behaviourClass
+        ? api.classGetMethodFromName(behaviourClass, "get_enabled", 0) : NULL;
+    if (playerCamera && getEnabled) {
+        exception = NULL;
+        boxed = api.runtimeInvoke(
+            getEnabled, playerCamera, NULL, &exception);
+        if (boxed && !exception) {
+            memcpy(&cameraEnabled, api.objectUnbox(boxed),
+                   sizeof(cameraEnabled));
+            cameraEnabledRead = YES;
+        }
+    }
+    fprintf(stderr,
+        "#### APP-INPUT 7DTD-WORLD-STATE phase=%s primary=%p "
+        "windowManager=%p loadingID=%s loadingWindow=%p "
+        "open=%u showing=%u camera=%p enabled=%s\n",
+        phase ? phase : "unknown", primaryUI, windowManager,
+        loadingIDText ? loadingIDText : "<nil>", loadingWindow,
+        loadingOpen, loadingShowing, playerCamera,
+        cameraEnabledRead ? (cameraEnabled ? "YES" : "NO") : "UNREADABLE");
+    fflush(stderr);
+    if (loadingIDText && api.monoFree) api.monoFree(loadingIDText);
+    if (hoverText && api.monoFree) api.monoFree(hoverText);
+}
+
+static void MacWSInstallUnityDidSendEventDiagnostic(void) {
+    static BOOL installed;
+    if (installed || !MacWSRuntimeDiagnosticsEnabled() ||
+        !MacWSMainBundleIsSevenDaysToDie()) return;
+    Class delegateClass = objc_getClass("PlayerAppDelegate");
+    Method method = delegateClass ? class_getInstanceMethod(
+        delegateClass, sel_registerName("DidSendEvent:")) : NULL;
+    if (!method) return;
+    IMP implementation = method_getImplementation(method);
+    if (implementation != (IMP)MacWSUnityDidSendEventDiagnostic) {
+        MacWSOriginalUnityDidSendEvent =
+            (MacWSUnityDidSendEvent)implementation;
+        method_setImplementation(
+            method, (IMP)MacWSUnityDidSendEventDiagnostic);
+    }
+    installed = YES;
+    fprintf(stderr,
+        "#### APP-INPUT UNITY-DID-SEND-INSTALL pid=%d class=%s\n",
+        getpid(), class_getName(delegateClass));
+    fflush(stderr);
+}
+
 // Boundary between CoreGraphics' event queue and the target AppKit main
 // thread. Besides timing witnesses, this restores the double-click field on
 // the exact native down/up pair matched above; every unrelated event passes
 // through byte-for-byte unchanged.
 static void MacWSAppInputApplicationSendEvent(id self, SEL command, id event) {
+    MacWSInstallUnityDidSendEventDiagnostic();
     NSUInteger type = event ? ((MacWSMsgUInteger)objc_msgSend)(
         event, sel_registerName("type")) : 0;
+    if (type == 1 && MacWSRuntimeDiagnosticsEnabled() &&
+        MacWSMainBundleIsSevenDaysToDie()) {
+        uint64_t untilMicros = (uint64_t)(
+            (MacWSAppInputMonotonicSeconds() + 1.0) * 1000000.0);
+        atomic_store_explicit(&MacWSUnityMouseDiagnosticSequence, 0,
+                              memory_order_release);
+        atomic_store_explicit(&MacWSUnityMouseDiagnosticUntilMicros,
+                              untilMicros, memory_order_release);
+    }
     BOOL processLocalMouseEvent = event && type >= 1 && type <= 7 &&
         MacWSIsProcessLocalMouseEvent(event);
     // leftMouseDragged/rightMouseDragged already encode which hardware button
@@ -1467,17 +1858,40 @@ static void MacWSAppInputApplicationSendEvent(id self, SEL command, id event) {
             }
         }
     }
-    // A permitted hardware CGEvent updates both the pressed-button mask and
-    // +[NSEvent mouseLocation] before AppKit dispatches mouseDown.  Our
-    // process-local NSEvent route already restores the former above, but the
-    // latter otherwise remains at WindowServer's stale global cursor because
-    // this launchd session cannot post a CGEvent.  AppKit's title/toolbar
-    // trackers consult that global location even though the event carries a
-    // correct locationInWindow; leaving the two coordinate states divergent
-    // makes content views clickable while title-bar controls ignore the same
-    // coherent down/up pair.  Scope the location bridge to the synchronous
-    // synthetic tracker only.  Every unrelated caller still receives the
-    // original NSEvent class-method result.
+    // Commit the location carried by every mouse NSEvent that AppKit actually
+    // dispatches. Hardware WindowServer input ordinarily makes
+    // +[NSEvent mouseLocation] agree before this boundary, while both of our
+    // permitted synthetic routes can leave that global state stale. Runtime-
+    // confirmed in 7DTD PID 79009: a Host CG mouse-down arrived at local
+    // (57,193), then Unity's next +mouseLocation poll still returned the prior
+    // control's screen point (613,346.5). Deriving this value from the received
+    // event also lets a later real mouse event replace the synthetic position;
+    // it does not pin a bridge-only coordinate indefinitely.
+    CGPoint deliveredMouseLocation = {0.0, 0.0};
+    BOOL hasDeliveredMouseLocation = NO;
+    if (type >= 1 && type <= 7 && event) {
+        id deliveredWindow = ((MacWSMsgID)objc_msgSend)(
+            event, sel_registerName("window"));
+        CGPoint deliveredLocal = ((MacWSMsgPoint)objc_msgSend)(
+            event, sel_registerName("locationInWindow"));
+        deliveredMouseLocation = deliveredWindow
+            ? ((MacWSMsgPointPoint)objc_msgSend)(
+                deliveredWindow, sel_registerName("convertPointToScreen:"),
+                deliveredLocal)
+            : deliveredLocal;
+        if (isfinite(deliveredMouseLocation.x) &&
+            isfinite(deliveredMouseLocation.y)) {
+            MacWSAppInputPersistentMouseLocation = deliveredMouseLocation;
+            MacWSAppInputPersistentMouseLocationValid = YES;
+            hasDeliveredMouseLocation = YES;
+        }
+    }
+
+    // A permitted hardware CGEvent also updates the pressed-button mask.
+    // Our process-local route restores that invariant above, but AppKit's
+    // synchronous title/toolbar trackers additionally consult the class-level
+    // pointer property while the callback is still active. Keep a transient
+    // value for that interval; the committed value above serves later polls.
     BOOL bridgeMouseLocation = type >= 1 && type <= 7 &&
         MacWSAppInputRFBTrackingActive;
     BOOL previousMouseLocationActive = MacWSAppInputMouseLocationActive;
@@ -1485,15 +1899,9 @@ static void MacWSAppInputApplicationSendEvent(id self, SEL command, id event) {
     CGPoint bridgedMouseLocation = {0.0, 0.0};
     CGPoint originalMouseLocation = {0.0, 0.0};
     BOOL hasBridgedMouseLocation = NO;
-    if (bridgeMouseLocation && event) {
-        id eventWindow = ((MacWSMsgID)objc_msgSend)(
-            event, sel_registerName("window"));
-        if (eventWindow) {
-            CGPoint eventLocation = ((MacWSMsgPoint)objc_msgSend)(
-                event, sel_registerName("locationInWindow"));
-            bridgedMouseLocation = ((MacWSMsgPointPoint)objc_msgSend)(
-                eventWindow, sel_registerName("convertPointToScreen:"),
-                eventLocation);
+    if (bridgeMouseLocation && hasDeliveredMouseLocation) {
+        {
+            bridgedMouseLocation = deliveredMouseLocation;
             Class eventClass = object_getClass(event);
             originalMouseLocation = MacWSOriginalMouseLocation && eventClass
                 ? MacWSOriginalMouseLocation(
@@ -2035,8 +2443,9 @@ static BOOL MacWSPrepareDirectKeyPostLocked(
 }
 
 static NSUInteger MacWSAppInputPressedMouseButtons(id self, SEL command) {
-    NSUInteger buttons = MacWSOriginalPressedMouseButtons
+    NSUInteger originalButtons = MacWSOriginalPressedMouseButtons
         ? MacWSOriginalPressedMouseButtons(self, command) : 0;
+    NSUInteger buttons = originalButtons;
     // RE-confirmed in the macOS 13.4 AppKit actually loaded on the device:
     // NSControlTrackMouse+668 calls +[NSEvent pressedMouseButtons], and
     // +672..720 immediately invokes _controlStopTracking when bit 0 is clear,
@@ -2046,20 +2455,104 @@ static NSUInteger MacWSAppInputPressedMouseButtons(id self, SEL command) {
     // gesture. All unrelated callers receive the real AppKit result unchanged.
     if (MacWSAppInputRFBTrackingActive)
         buttons |= MacWSAppInputRFBTrackingButtons;
+    uint64_t nowMicros = (uint64_t)(
+        MacWSAppInputMonotonicSeconds() * 1000000.0);
+    if (MacWSRuntimeDiagnosticsEnabled() &&
+        MacWSMainBundleIsSevenDaysToDie() &&
+        nowMicros <= atomic_load_explicit(
+            &MacWSUnityMouseDiagnosticUntilMicros, memory_order_acquire)) {
+        uint64_t sequence = atomic_fetch_add_explicit(
+            &MacWSUnityMouseDiagnosticSequence, 1, memory_order_relaxed) + 1;
+        void *caller = __builtin_return_address(0);
+        Dl_info info = {0};
+        dladdr(caller, &info);
+        fprintf(stderr,
+            "#### APP-INPUT UNITY-POLL-BUTTONS pid=%d sequence=%llu "
+            "original=%#lx bridged=%#lx active=%s caller=%s+%#lx\n",
+            getpid(), (unsigned long long)sequence,
+            (unsigned long)originalButtons,
+            (unsigned long)buttons,
+            MacWSAppInputRFBTrackingActive ? "YES" : "NO",
+            info.dli_fname ?: "(unknown)",
+            info.dli_fbase
+                ? (unsigned long)((uintptr_t)caller -
+                                  (uintptr_t)info.dli_fbase) : 0UL);
+        fflush(stderr);
+    }
     return buttons;
 }
 
 static CGPoint MacWSAppInputCurrentMouseLocation(id self, SEL command) {
-    if (MacWSAppInputMouseLocationActive)
-        return MacWSAppInputMouseLocation;
-    return MacWSOriginalMouseLocation
+    CGPoint point = MacWSAppInputMouseLocationActive
+        ? MacWSAppInputMouseLocation
+        : MacWSAppInputPersistentMouseLocationValid
+        ? MacWSAppInputPersistentMouseLocation
+        : MacWSOriginalMouseLocation
         ? MacWSOriginalMouseLocation(self, command) : (CGPoint){0.0, 0.0};
+    uint64_t nowMicros = (uint64_t)(
+        MacWSAppInputMonotonicSeconds() * 1000000.0);
+    if (MacWSRuntimeDiagnosticsEnabled() &&
+        MacWSMainBundleIsSevenDaysToDie() &&
+        nowMicros <= atomic_load_explicit(
+            &MacWSUnityMouseDiagnosticUntilMicros, memory_order_acquire)) {
+        uint64_t sequence = atomic_fetch_add_explicit(
+            &MacWSUnityMouseDiagnosticSequence, 1, memory_order_relaxed) + 1;
+        void *caller = __builtin_return_address(0);
+        Dl_info info = {0};
+        dladdr(caller, &info);
+        fprintf(stderr,
+            "#### APP-INPUT UNITY-POLL-LOCATION pid=%d sequence=%llu "
+            "point=(%.2f,%.2f) route=%s caller=%s+%#lx\n",
+            getpid(), (unsigned long long)sequence, point.x, point.y,
+            MacWSAppInputMouseLocationActive ? "transient" :
+                (MacWSAppInputPersistentMouseLocationValid
+                    ? "persistent" : "windowserver"),
+            info.dli_fname ?: "(unknown)",
+            info.dli_fbase
+                ? (unsigned long)((uintptr_t)caller -
+                                  (uintptr_t)info.dli_fbase) : 0UL);
+        // Diagnostic-only call-chain witness. The public class method enters
+        // this replacement through AppKit's forwarding veneer, so level zero
+        // alone names AppKit rather than the concrete Unity polling site.
+        // Record a bounded prefix for the first few samples; no return value
+        // or application state is changed.
+        static BOOL loggedPersistentStack;
+        BOOL logStack = sequence <= 3 ||
+            (!MacWSAppInputMouseLocationActive &&
+             MacWSAppInputPersistentMouseLocationValid &&
+             !loggedPersistentStack);
+        if (logStack) {
+            if (!MacWSAppInputMouseLocationActive &&
+                MacWSAppInputPersistentMouseLocationValid)
+                loggedPersistentStack = YES;
+            void *frames[12] = {0};
+            int frameCount = backtrace(frames, 12);
+            fprintf(stderr,
+                "#### APP-INPUT UNITY-POLL-STACK pid=%d sequence=%llu frames=",
+                getpid(), (unsigned long long)sequence);
+            for (int index = 0; index < frameCount; index++) {
+                Dl_info frameInfo = {0};
+                dladdr(frames[index], &frameInfo);
+                fprintf(stderr, "%s%s+%#lx", index ? "," : "",
+                    frameInfo.dli_fname ?: "(unknown)",
+                    frameInfo.dli_fbase
+                        ? (unsigned long)((uintptr_t)frames[index] -
+                                          (uintptr_t)frameInfo.dli_fbase)
+                        : 0UL);
+            }
+            fputc('\n', stderr);
+        }
+        fflush(stderr);
+    }
+    return point;
 }
 
 // Process-local NSEvents cannot update WindowServer's global cursor state.
-// Keep +[NSEvent mouseLocation] and pressedMouseButtons coherent for the
-// duration of one direct synthetic dispatch, matching the state invariants of
-// a hardware CGEvent. This is required even for button-free mouseMoved:
+// Keep +[NSEvent mouseLocation] and pressedMouseButtons coherent during one
+// direct synthetic dispatch, matching the synchronous state invariants of a
+// hardware CGEvent. The last position is retained separately by the routing
+// path below so later asynchronous polling sees the same cursor location.
+// This is required even for button-free mouseMoved:
 // NSTabBar uses the class-level mouse location to enter its hover state and
 // reveal the standard close button before the following click.
 static void MacWSSendMouseEventWithStateBridge(id application, id event,
@@ -7388,6 +7881,15 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
     double latencyMainStart =
         (record.flags & MacWSInputFlagLatencyDiagnostic)
             ? MacWSInputUptimeSeconds() : 0.0;
+    if ((record.flags & MacWSInputFlagLatencyDiagnostic) &&
+        MacWSRuntimeDiagnosticsEnabled() &&
+        MacWSMainBundleIsSevenDaysToDie()) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     100 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
+            MacWSLogUnityNGUIInputState("host-state-probe");
+        });
+    }
     BOOL logEvent = (MacWSRuntimeDiagnosticsEnabled() ||
                      record.contactID == MACWS_INPUT_CONTACT_DIAGNOSTIC) &&
         record.kind != MacWSInputKindTouchMove &&
@@ -7471,6 +7973,33 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
         fprintf(stderr,
                 "#### APP-INPUT DROP pid=%d reason=no-application-or-screen\n",
                 getpid());
+        return;
+    }
+
+    if (record.kind == MacWSInputKindTap &&
+        MacWSMainBundleIsSevenDaysToDie()) {
+        // Runtime-confirmed on iPad14,5 with the arm64 Unity 2022.3.62f2
+        // player: the generic atomic-Tap shortcut reaches NGUI's exact hover
+        // target but does not advance PLAY GAME, while the existing ordinary
+        // TouchDown/TouchUp gesture state machine advances that same button.
+        // Expand only this game's high-level stationary Tap into those two
+        // real NSEvent transitions.  Runtime A/B also established that a
+        // 50-ms split advances PLAY GAME while a same-turn pair does not.
+        // Put both phases through the ordinary socket-input FIFO so they take
+        // the exact buffered AppKit tracker route as separate Host down/up
+        // records; no NGUI action or hit-test result is forged.
+        MacWSInputRecord downRecord = record;
+        downRecord.kind = MacWSInputKindTouchDown;
+        if (downRecord.pressure <= 0.0f) downRecord.pressure = 1.0f;
+        MacWSInputRecord upRecord = record;
+        upRecord.kind = MacWSInputKindTouchUp;
+        upRecord.pressure = 0.0f;
+        MacWSEnqueueAppInputRecord(downRecord);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     50 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
+            MacWSEnqueueAppInputRecord(upRecord);
+        });
         return;
     }
 
@@ -8452,7 +8981,25 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
             MacWSExactSystemPointerActive &&
             MacWSExactSystemPointerContact == record.contactID &&
             MacWSExactSystemPointerWindow == requestedWindowNumber;
-        if (exactSystemContinuation &&
+        if (record.source == MacWSInputSourceVNC) {
+            // OSXvnc publishes x/y against its complete advertised Retina
+            // framebuffer. macwsinputd resolves the live target and adds its
+            // exact window ID, but it deliberately leaves that producer
+            // geometry unchanged. Runtime-confirmed on iPad14,5 with 7DTD
+            // window 649: RFB (848,1006)/2732x2048 is AppKit screen
+            // (424,521), local (61,195); treating the same record as a
+            // window-local DisplayStream sample produced local (424,-115),
+            // so Unity never armed the visible Play control. Preserve the
+            // broker's exact window identity while mapping this one producer
+            // through the desktop affine it actually declared.
+            inputMappingFrame = screenFrame;
+            screenPoint = (CGPoint){
+                screenFrame.origin.x +
+                    normalizedX * screenFrame.size.width,
+                screenFrame.origin.y +
+                    (1.0 - normalizedY) * screenFrame.size.height,
+            };
+        } else if (exactSystemContinuation &&
             MacWSExactSystemPointerMappingFrame.size.width > 0.0 &&
             MacWSExactSystemPointerMappingFrame.size.height > 0.0) {
             // WindowServer updates NSWindow.frame during a native drag. Using
@@ -9203,6 +9750,19 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
             fflush(stderr);
         }
     }
+    // A real CGEvent commits its screen position to WindowServer before
+    // NSApplication dispatch and that value remains visible to later
+    // +[NSEvent mouseLocation] calls. This exact-window fallback is
+    // process-local, so persist the already-resolved screen point here after
+    // all native CGEvent routes above declined the record. RE-confirmed in
+    // UnityPlayer 2022.3.62f2 arm64: 0xf1dd34 calls 0xf2ab24 once per input
+    // tick, 0xf2abac invokes +[NSEvent mouseLocation], and stores the result at
+    // InputManager+0xc8; -[PlayerAppDelegate DidSendEvent:] then reads that
+    // same field at 0xf1a864 when constructing the queued mouse event. A
+    // dispatch-only override therefore left every click paired with the old
+    // absolute position even though its NSEvent.locationInWindow was correct.
+    MacWSAppInputPersistentMouseLocation = screenPoint;
+    MacWSAppInputPersistentMouseLocationValid = YES;
     NSUInteger eventType = MacWSNSEventType((MacWSInputKind)record.kind);
     NSInteger clickCount = (record.flags & MacWSInputFlagDoubleClick) ? 2 : 1;
     BOOL pressed = record.kind == MacWSInputKindTouchDown ||

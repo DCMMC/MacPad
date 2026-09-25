@@ -31,6 +31,7 @@
 #import <sys/socket.h>
 #import <sys/un.h>
 #import <poll.h>
+#import <pwd.h>
 #include <execinfo.h>
 #import "macws_host_protocol.h"
 #include "macws_keyboard_state.h"
@@ -395,9 +396,36 @@ static bool macws_stray_agx_compat_enabled(void) {
     return value != 0;
 }
 
+// Some macOS game producers leave the otherwise fully identified subtype-3
+// resource-family opcode at zero. Keep zero-opcode admission in the exact
+// child environment selected by the launcher: opcode 4 remains the generic
+// contract, and unrelated desktop/M1 processes retain the stricter rule.
+//
+// Runtime-confirmed on iPad14,5 / iOS 16.0 with 7 Days To Die's arm64 Unity
+// 2022.3.62f2 player. Its NSError-matched submit serial 72848 contained 33
+// validated direct-list records; 32 normalized, while the sole remaining
+// record was subtype 3, span 0x228, resources 8/0x0c, mode 2, opcode 0 and
+// retained the macOS 0x1e8/0x1b8 core. The launcher sets this only for that
+// exact copied runtime executable so the on-device A/B can exercise the same
+// structural family without weakening its byte/range/resource anchors.
+static bool macws_agx_opcode_zero_compat_enabled(void) {
+    static _Atomic int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_acquire);
+    if (value < 0) {
+        const char *setting = getenv("MACWS_AGX_OPCODE_ZERO_COMPAT");
+        value = setting != NULL && setting[0] != '\0' &&
+            strcmp(setting, "0") != 0;
+        atomic_store_explicit(&cached, value, memory_order_release);
+    }
+    return value != 0;
+}
+
 static bool macws_jit_trace_enabled(void) {
+    const char *program = getprogname();
     return macws_runtime_diagnostics_enabled() ||
-        getenv("MACWS_JIT_MPROTECT_TRACE") != NULL;
+        getenv("MACWS_JIT_MPROTECT_TRACE") != NULL ||
+        (program && strcmp(program, "7 Days To Die") == 0 &&
+         access("/tmp/macws_7dtd_jit_trace", F_OK) == 0);
 }
 
 // mach_vm_map participates in libSystem's own allocation bootstrap, before
@@ -439,11 +467,18 @@ typedef struct {
 // for recognizing later mprotect calls, but flip only the subranges whose
 // requested protection actually includes execute. Treating the full arena as
 // code turns Mono's hazard-pointer data pages RX when a write scope closes.
-#define MACWS_JIT_RESERVATION_CAPACITY 32u
+// V8 normally uses a handful of large reservations, but Unity Mono 2022.3.62f2
+// creates hundreds of small MAP_JIT arenas while loading 7DTD assemblies.
+// Runtime-confirmed on the M2/iOS 16.0 rehost: the old 32-entry table was full
+// while PC 0x126610b00 executed from an untracked rw-/rwx 256-KiB VM_ALLOCATE
+// region, producing a repeated instruction SIGBUS.  This fixed table is read
+// from a signal handler, so keep it allocation-free but large enough for Mono.
+#define MACWS_JIT_RESERVATION_CAPACITY 4096u
 #define MACWS_JIT_EXEC_RANGE_CAPACITY 1024u
 static MacWSJITRange
     g_macws_jit_ranges[MACWS_JIT_RESERVATION_CAPACITY];
 static _Atomic unsigned g_macws_jit_range_count = 0;
+static _Atomic unsigned g_macws_jit_reservation_overflows = 0;
 static MacWSJITRange
     g_macws_jit_exec_ranges[MACWS_JIT_EXEC_RANGE_CAPACITY];
 static _Atomic unsigned g_macws_jit_exec_range_count = 0;
@@ -478,6 +513,10 @@ typedef struct {
     uint32_t write_faults;
     uint32_t dirty_pages;
     uint32_t reserved;
+    uint64_t registers[16];
+    uint64_t frame_pointer;
+    uint64_t link_register;
+    uint64_t stack_pointer;
 } MacWSJITForwardRecord;
 
 // V8 reserves one 256-MiB arm64 CodeRange (16,384 pages on this device).  A
@@ -699,6 +738,17 @@ static void macws_jit_record_range(void *address, size_t size,
                 count, address, (void *)((uintptr_t)address + size),
                 protection, (protection & PROT_EXEC) != 0);
         }
+    } else {
+        unsigned overflows = atomic_fetch_add_explicit(
+            &g_macws_jit_reservation_overflows, 1,
+            memory_order_relaxed) + 1;
+        if (macws_jit_trace_enabled() &&
+            (overflows <= 32 || (overflows % 1024) == 0)) {
+            fprintf(stderr,
+                "#### JIT-MPROTECT reservation table FULL "
+                "overflow=%u base=%p size=%#zx initial-prot=%#x\n",
+                overflows, address, size, protection);
+        }
     }
     pthread_mutex_unlock(&g_macws_jit_state_lock);
     macws_jit_ensure_exec_barrier_handler();
@@ -914,7 +964,7 @@ static void macws_jit_exec_barrier_sigbus(int signo, siginfo_t *info,
     if (record_fd >= 0) {
         MacWSJITForwardRecord record = {
             .magic = 0x4d57534a49544657ULL, // "MWSJITFW"
-            .version = 1,
+            .version = 2,
             .signo = signo,
             .signal_code = info ? info->si_code : 0,
             .thread_writable = g_macws_jit_thread_writable ? 1u : 0u,
@@ -931,6 +981,20 @@ static void macws_jit_exec_barrier_sigbus(int signo, siginfo_t *info,
             .dirty_pages = atomic_load_explicit(
                 &g_macws_jit_dirty_page_count, memory_order_relaxed),
         };
+#if defined(__arm64__) || defined(__arm64e__)
+        if (ucontext && ucontext->uc_mcontext) {
+            for (unsigned index = 0; index < 16; index++) {
+                record.registers[index] =
+                    ucontext->uc_mcontext->__ss.__x[index];
+            }
+            record.frame_pointer =
+                arm_thread_state64_get_fp(ucontext->uc_mcontext->__ss);
+            record.link_register =
+                arm_thread_state64_get_lr(ucontext->uc_mcontext->__ss);
+            record.stack_pointer =
+                arm_thread_state64_get_sp(ucontext->uc_mcontext->__ss);
+        }
+#endif
         (void)write(record_fd, &record, sizeof(record));
     }
     macws_jit_forward_sigbus(signo, info, context);
@@ -4970,6 +5034,163 @@ static void macws_optimize_stray_steam_overlay_debug_label(
 
 static _Atomic bool g_macws_mono_interpreter_configured = false;
 static _Atomic bool g_macws_mono_jit_import_rebound = false;
+static _Atomic bool g_macws_mono_clone_diagnostic_installed = false;
+static _Atomic unsigned g_macws_mono_clone_diagnostic_records = 0;
+static int g_macws_mono_clone_diagnostic_fd = -1;
+
+typedef struct {
+    uint64_t magic;
+    uint32_t version;
+    uint32_t sequence;
+    uint64_t return_address;
+    uint64_t destination_handle;
+    uint64_t source_handle;
+    uint64_t destination_object;
+    uint64_t source_object;
+    uint64_t destination_vtable;
+    uint64_t source_vtable;
+    uint64_t destination_class;
+    uint64_t source_class;
+    uint32_t destination_instance_size;
+    uint32_t source_instance_size;
+    uint8_t destination_rank;
+    uint8_t source_rank;
+    uint8_t reserved[6];
+} MacWSMonoCloneRecord;
+
+static void (*g_macws_mono_object_copy_internal)(void *, void *);
+
+static bool macws_mono_clone_read(uintptr_t address, void *bytes,
+                                  size_t size) {
+    vm_size_t copied = 0;
+    return address && bytes && size &&
+        vm_read_overwrite(mach_task_self(), (vm_address_t)address, size,
+                          (vm_address_t)bytes, &copied) == KERN_SUCCESS &&
+        copied == size;
+}
+
+static void macws_mono_clone_capture_chain(
+        uintptr_t handle, uint64_t *object_out, uint64_t *vtable_out,
+        uint64_t *class_out, uint32_t *size_out, uint8_t *rank_out) {
+    uintptr_t object = 0;
+    uintptr_t vtable = 0;
+    uintptr_t klass = 0;
+    if (!macws_mono_clone_read(handle, &object, sizeof(object)) ||
+        !macws_mono_clone_read(object, &vtable, sizeof(vtable)) ||
+        !macws_mono_clone_read(vtable, &klass, sizeof(klass))) {
+        return;
+    }
+    uint32_t instance_size = 0;
+    uint8_t rank = 0;
+    (void)macws_mono_clone_read(klass + 0x1c, &instance_size,
+                                sizeof(instance_size));
+    (void)macws_mono_clone_read(klass + 0x1a, &rank, sizeof(rank));
+    *object_out = object;
+    *vtable_out = vtable;
+    *class_out = klass;
+    *size_out = instance_size;
+    *rank_out = rank;
+}
+
+static void macws_mono_clone_diagnostic(void *destination_handle,
+                                        void *source_handle) {
+    unsigned sequence = atomic_fetch_add_explicit(
+        &g_macws_mono_clone_diagnostic_records, 1, memory_order_relaxed) + 1;
+    if (sequence <= 256 && g_macws_mono_clone_diagnostic_fd >= 0) {
+        MacWSMonoCloneRecord record = {
+            .magic = 0x4d57534d434c4f4eULL, // "MWSMCLON"
+            .version = 1,
+            .sequence = sequence,
+            .return_address = (uintptr_t)__builtin_return_address(0),
+            .destination_handle = (uintptr_t)destination_handle,
+            .source_handle = (uintptr_t)source_handle,
+        };
+        macws_mono_clone_capture_chain(
+            (uintptr_t)destination_handle, &record.destination_object,
+            &record.destination_vtable, &record.destination_class,
+            &record.destination_instance_size, &record.destination_rank);
+        macws_mono_clone_capture_chain(
+            (uintptr_t)source_handle, &record.source_object,
+            &record.source_vtable, &record.source_class,
+            &record.source_instance_size, &record.source_rank);
+        (void)write(g_macws_mono_clone_diagnostic_fd, &record,
+                    sizeof(record));
+    }
+    // Exact original semantics at +0x1f1d18: conditionally dereference both
+    // handles, then tail-call mono_gc_wbarrier_object_copy_internal at
+    // +0x1f6be8. Do not validate, substitute, or repair either object here.
+    void *destination_object = destination_handle
+        ? *(void **)destination_handle : NULL;
+    void *source_object = source_handle ? *(void **)source_handle : NULL;
+    g_macws_mono_object_copy_internal(destination_object, source_object);
+}
+
+static void macws_install_mono_clone_diagnostic_if_requested(
+        const struct mach_header *untyped_header, const char *image_path) {
+    if (!getenv("MACWS_MONO_CLONE_DIAGNOSTICS") || !untyped_header ||
+        untyped_header->magic != MH_MAGIC_64 || !image_path ||
+        strstr(image_path, "/libmonobdwgc-2.0.dylib") == NULL ||
+        atomic_exchange_explicit(&g_macws_mono_clone_diagnostic_installed,
+                                 true, memory_order_acq_rel)) {
+        return;
+    }
+    static const uint8_t mono_uuid[16] = {
+        0xe0, 0x90, 0xf9, 0xf3, 0x50, 0x91, 0x3c, 0x8e,
+        0x82, 0x5d, 0xb8, 0x63, 0x2a, 0xbf, 0xbb, 0x84,
+    };
+    const struct mach_header_64 *header =
+        (const struct mach_header_64 *)untyped_header;
+    if (!macws_macho_uuid_matches(header, mono_uuid)) return;
+
+    g_macws_mono_clone_diagnostic_fd = open(
+        "/tmp/macws_mono_clone.bin", O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (g_macws_mono_clone_diagnostic_fd < 0) return;
+
+    // RE-confirmed via the exact UUID above: +0x1f1d18 is
+    // mono_gc_wbarrier_object_copy_handle. It dereferences the destination and
+    // source GC handles, then tail-calls mono_gc_wbarrier_object_copy_internal.
+    // This opt-in hook records both object->vtable->class chains without
+    // changing any argument or return value.
+    uint8_t *target = (uint8_t *)((uintptr_t)header + 0x1f1d18);
+    static const uint8_t expected[16] = {
+        0x40, 0x00, 0x00, 0xb4, // cbz x0, +8
+        0x00, 0x00, 0x40, 0xf9, // ldr x0, [x0]
+        0x41, 0x00, 0x00, 0xb4, // cbz x1, +8
+        0x21, 0x00, 0x40, 0xf9, // ldr x1, [x1]
+    };
+    if (memcmp(target, expected, sizeof(expected)) != 0) {
+        fprintf(stderr,
+                "#### MACWS-MONO-CLONE diagnostic rejected image=%s "
+                "reason=entry-mismatch target=%p\n",
+                image_path, target);
+        close(g_macws_mono_clone_diagnostic_fd);
+        g_macws_mono_clone_diagnostic_fd = -1;
+        return;
+    }
+    g_macws_mono_object_copy_internal =
+        (void *)((uintptr_t)header + 0x1f6be8);
+    uint32_t absolute_stub[4] = {
+        0x58000050, // ldr x16, #8
+        0xd61f0200, // br x16
+        0,
+        0,
+    };
+    uintptr_t replacement = (uintptr_t)macws_mono_clone_diagnostic;
+    memcpy(&absolute_stub[2], &replacement, sizeof(replacement));
+    const void *stub_bytes = absolute_stub;
+    const size_t stub_size = sizeof(absolute_stub);
+    ModifyExecutableRegion(target, stub_size, ^{
+        memcpy(target, stub_bytes, stub_size);
+    });
+    bool installed = memcmp(target, absolute_stub,
+                            sizeof(absolute_stub)) == 0;
+    fprintf(stderr,
+            "#### MACWS-MONO-CLONE diagnostic installed image=%s target=%p "
+            "replacement=%p internal=%p status=%s\n",
+            image_path, target, (void *)replacement,
+            g_macws_mono_object_copy_internal,
+            installed ? "installed" : "write-failed");
+}
 
 // Forward declaration for the exact Mono lazy-import repair below. The
 // ordinary DYLD_INTERPOSE tuple remains the preferred path for images whose
@@ -4979,7 +5200,8 @@ void pthread_jit_write_protect_np_new(int enabled);
 static void macws_rebind_mono_jit_write_protect_if_requested(
         const struct mach_header *untyped_header, intptr_t slide,
         const char *image_path) {
-    if (!getenv("MACWS_MONO_INTERPRETER") ||
+    if ((!getenv("MACWS_MONO_INTERPRETER") &&
+         !getenv("MACWS_MONO_JIT_COMPAT")) ||
         !getenv("MACWS_JIT_MPROTECT_COMPAT") ||
         atomic_load_explicit(&g_macws_mono_jit_import_rebound,
                              memory_order_acquire) ||
@@ -5165,11 +5387,23 @@ static void macws_configure_mono_interpreter_if_requested(void) {
             use_interpreter ? *use_interpreter : -1);
 }
 
+extern void MacWSInstallAudioRenderBridge(void);
+
 void loadImageCallback(const struct mach_header* header, intptr_t vmaddr_slide) {
     Dl_info info = {};
     (void)dladdr(header, &info);
     if (info.dli_fname &&
+        (strstr(info.dli_fname, "/AudioToolbox.framework/") != NULL ||
+         strstr(info.dli_fname, "/AudioUnit.framework/") != NULL)) {
+        // Electron can load the AudioUnit entry points after libmachook's
+        // constructor. Retry only when their defining image arrives; the
+        // installer is idempotent and excludes the two macOS audio daemons.
+        MacWSInstallAudioRenderBridge();
+    }
+    if (info.dli_fname &&
         strstr(info.dli_fname, "/libmonobdwgc-2.0.dylib") != NULL) {
+        macws_install_mono_clone_diagnostic_if_requested(
+            header, info.dli_fname);
         macws_rebind_mono_jit_write_protect_if_requested(
             header, vmaddr_slide, info.dli_fname);
         macws_configure_mono_interpreter_if_requested();
@@ -13850,10 +14084,27 @@ static const char *macws_private_bootstrap_service_name(const char *name) {
         return "com.apple.macosbooter.systemstatus.activityattribution";
     if (!strcmp(name, "com.apple.coreservices.launchservicesd"))
         return "com.apple.macosbooter.coreservices.launchservicesd";
-    if (!strcmp(name, "com.apple.cfprefsd.daemon"))
+    if (!strcmp(name, "com.apple.cfprefsd.daemon")) {
+        const char *mobileIdentity =
+            getenv("MACWS_SYNTHETIC_MOBILE_USER");
+        if (geteuid() == 501 && mobileIdentity &&
+            strcmp(mobileIdentity, "1") == 0)
+            return "com.apple.macosbooter.cfprefsd.agent.501";
         return "com.apple.macosbooter.cfprefsd.daemon";
-    if (!strcmp(name, "com.apple.cfprefsd.agent"))
+    }
+    if (!strcmp(name, "com.apple.cfprefsd.agent")) {
+        // A real macOS login session owns one cfprefsd agent per uid.  iOS
+        // has no user launchd domains, so MacWS publishes uid 0 and uid 501
+        // agents under distinct outer-bootstrap names.  Route only processes
+        // carrying the explicit synthetic uid-501 identity contract; root
+        // desktop clients retain the established endpoint.
+        const char *mobileIdentity =
+            getenv("MACWS_SYNTHETIC_MOBILE_USER");
+        if (geteuid() == 501 && mobileIdentity &&
+            strcmp(mobileIdentity, "1") == 0)
+            return "com.apple.macosbooter.cfprefsd.agent.501";
         return "com.apple.macosbooter.cfprefsd.agent";
+    }
     // iPadOS publishes the AudioComponentRegistrar protocol from
     // mediaserverd.  Runtime-confirmed on 2026-09-15: an unisolated Ventura
     // AudioComponentFindNext request was serviced by mediaserverd pid 380 and
@@ -14281,6 +14532,8 @@ static void *vproc_swap_string_new(void *vproc, int key,
     return error;
 }
 
+static bool macws_synthetic_mobile_user_enabled(void);
+
 // A normal macOS system bootstrap and login bootstrap never share
 // _CS_DARWIN_USER_DIR: root lsd owns the system store while the login lsd owns
 // a per-user store. MacWS has to submit both jobs to one outer launchd domain
@@ -14298,7 +14551,72 @@ static size_t macws_confstr_new(int name, char *buffer, size_t length) {
         if (buffer && length > 0) strlcpy(buffer, sessionDirectory, length);
         return required;
     }
+    if (macws_synthetic_mobile_user_enabled()) {
+        const char *mobileDirectory = NULL;
+        switch (name) {
+            case _CS_DARWIN_USER_DIR:
+                mobileDirectory = "/var/folders/zz/macws_uid501/0/";
+                break;
+            case _CS_DARWIN_USER_CACHE_DIR:
+                mobileDirectory = "/var/folders/zz/macws_uid501/C/";
+                break;
+            case _CS_DARWIN_USER_TEMP_DIR:
+                mobileDirectory = "/var/folders/zz/macws_uid501/T/";
+                break;
+            default:
+                break;
+        }
+        if (mobileDirectory) {
+            size_t required = strlen(mobileDirectory) + 1;
+            if (buffer && length > 0)
+                strlcpy(buffer, mobileDirectory, length);
+            return required;
+        }
+    }
     return confstr(name, buffer, length);
+}
+
+// launchdchrootexec can correctly enter the chroot as uid/gid 501, but the
+// restored Ventura rootfs has no uid-501 account (`id -P mobile` and
+// getpwuid(501) both return no record).  Runtime-confirmed consequences are
+// upstream of 7DTD: a genuine uid-501 cfprefsd agent starts, yet a stock
+// `defaults write` round-trip reports "Could not write domain" because
+// CoreFoundation cannot resolve that login agent's home.
+//
+// Supply the missing login identity only to explicitly tagged uid-501
+// processes.  A native directory-service record always wins.  No preference
+// result, write status or application value is fabricated; cfprefsd still
+// performs its normal plist I/O and atomic replacement below /Users/mobile.
+static bool macws_synthetic_mobile_user_enabled(void) {
+    const char *enabled = getenv("MACWS_SYNTHETIC_MOBILE_USER");
+    return geteuid() == 501 && enabled && strcmp(enabled, "1") == 0;
+}
+
+static struct passwd g_macws_mobile_passwd = {
+    .pw_name = "mobile",
+    .pw_passwd = "*",
+    .pw_uid = 501,
+    .pw_gid = 501,
+    .pw_change = 0,
+    .pw_class = "",
+    .pw_gecos = "Mobile User",
+    .pw_dir = "/Users/mobile",
+    .pw_shell = "/bin/bash",
+    .pw_expire = 0,
+};
+
+static struct passwd *macws_getpwuid(uid_t uid) {
+    struct passwd *record = getpwuid(uid);
+    if (record || uid != 501 || !macws_synthetic_mobile_user_enabled())
+        return record;
+    return &g_macws_mobile_passwd;
+}
+
+static struct passwd *macws_getpwnam(const char *name) {
+    struct passwd *record = getpwnam(name);
+    if (record || !name || strcmp(name, "mobile") != 0 ||
+        !macws_synthetic_mobile_user_enabled()) return record;
+    return &g_macws_mobile_passwd;
 }
 
 static id (*macws_lsd_database_store_url_orig)(id, SEL) = NULL;
@@ -19944,7 +20262,8 @@ static unsigned macws_translate_agx_segment_list_records(
     BOOL direct_subtype3_all_ones_resource_family =
         direct_subtype3_all_ones_resource_family_without_opcode &&
         (*(uint32_t *)(commands + 0x08) == 4 ||
-         (macws_stray_agx_compat_enabled() &&
+         ((macws_stray_agx_compat_enabled() ||
+           macws_agx_opcode_zero_compat_enabled()) &&
           *(uint32_t *)(commands + 0x08) == 0));
     if (macws_kcmd_stray_subtype3_diag_enabled() &&
         direct_subtype3_all_ones_resource_family_without_opcode &&
@@ -20489,7 +20808,8 @@ static unsigned macws_translate_agx_segment_list_records(
         BOOL subtype3_all_ones_resource_family =
             subtype3_all_ones_resource_family_without_opcode &&
             (*(uint32_t *)(record + 0x08) == 4 ||
-             (macws_stray_agx_compat_enabled() &&
+             ((macws_stray_agx_compat_enabled() ||
+               macws_agx_opcode_zero_compat_enabled()) &&
               *(uint32_t *)(record + 0x08) == 0));
         if (macws_kcmd_stray_subtype3_diag_enabled() &&
             subtype3_all_ones_resource_family_without_opcode &&
@@ -23814,6 +24134,8 @@ DYLD_INTERPOSE(CVDisplayLinkSetOutputCallback_new,
                CVDisplayLinkSetOutputCallback);
 DYLD_INTERPOSE(vproc_swap_string_new, vproc_swap_string);
 DYLD_INTERPOSE(macws_confstr_new, confstr);
+DYLD_INTERPOSE(macws_getpwuid, getpwuid);
+DYLD_INTERPOSE(macws_getpwnam, getpwnam);
 
 // XPC-borrow the AGX io_connect_t from macwsallocd. The helper is iOS-Apple-
 // signed-equivalent so the kernel runs the full privileged UC-init (sets

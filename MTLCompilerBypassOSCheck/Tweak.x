@@ -640,6 +640,55 @@ static bool MacWSIsSteamHelperWorkingDirectoryToken(const uint8_t *token,
     return false;
 }
 
+// Unity 2022.3.62f2 does not serialize the module-cache argument used by
+// Chromium.  The arm64 7DTD runtime instead sends the same 335-byte Metal 3.0
+// option block for every source library and identifies its prepared runtime
+// through this exact Resources working directory.  Runtime capture on the
+// iPad14,5/iOS 16.0 target recorded source requests with layout deltas 0 and
+// 4; the latter is Apple's short serialization for the one-byte empty source.
+// Admit only that exact private runtime contract.  This selects the existing
+// real macOS compiler target and never changes a compiler result or loader
+// validation.
+static bool MacWSIsSevenDaysUnitySourceRequest(
+        const uint8_t *token, size_t tokenLength,
+        uint64_t sourceLength, uint64_t argumentLength,
+        long long layoutDelta) {
+    static const char exactToken[] =
+        "-working-directory \"/Users/root/Library/Application Support/Steam/"
+        "steamapps/macws-runtime/7 Days To Die/7DaysToDie-ARM.app/Contents/"
+        "Resources\"";
+    return token &&
+        tokenLength == sizeof(exactToken) - 1 &&
+        memcmp(token, exactToken, sizeof(exactToken) - 1) == 0 &&
+        sourceLength >= 1 && argumentLength == 335 &&
+        (layoutDelta == 0 || layoutDelta == 4);
+}
+
+// Steam's overlay injects one separate Metal source library after Unity's
+// first library succeeds.  Runtime capture from the real Steam-owned 7DTD
+// child on iPad14,5/iOS 16.0 recorded the exact source/serialization tuple
+// below.  Leaving it on the service's iOS default target returned a real
+// library whose `steamoverlay_vs` lookup was nil; the following stock render
+// pipeline validation then aborted on `vertexFunction must not be nil`.
+// Select macOS only for this byte-exact upstream overlay source in the exact
+// prepared 7DTD Resources directory.  Compiler output and function/pipeline
+// validation remain untouched.
+static bool MacWSIsSevenDaysOverlaySourceRequest(
+        const uint8_t *token, size_t tokenLength, size_t requestSize,
+        uint64_t sourceLength, uint64_t argumentLength,
+        long long layoutDelta, uint64_t sourceHash) {
+    static const char exactToken[] =
+        "-working-directory \"/Users/root/Library/Application Support/Steam/"
+        "steamapps/macws-runtime/7 Days To Die/7DaysToDie-ARM.app/Contents/"
+        "Resources\"";
+    return token &&
+        tokenLength == sizeof(exactToken) - 1 &&
+        memcmp(token, exactToken, sizeof(exactToken) - 1) == 0 &&
+        requestSize == 2407 && sourceLength == 2189 &&
+        argumentLength == 199 && layoutDelta == 0 &&
+        sourceHash == UINT64_C(0xc9b090f289e24745);
+}
+
 static void DumpCompilerRequest(uint32_t sequence, uint64_t sourceHash,
                                 const void *request, size_t requestSize) {
     if (!request || !requestSize || sequence > 64) return;
@@ -818,6 +867,18 @@ static uintptr_t MacWSMTLCodeGenServiceBuildRequest(
             sourceHashLength--;
         uint64_t sourceHash = sourceHashLength
             ? MacWSFNV1a64(bytes + 16, sourceHashLength) : 0;
+        uint64_t expectedSize = sourceLength <= UINT64_MAX - 23
+            ? ((UINT64_C(16) + sourceLength + 7) & ~UINT64_C(7))
+            : UINT64_MAX;
+        if (expectedSize != UINT64_MAX &&
+            argumentLength <= UINT64_MAX - expectedSize) {
+            expectedSize += argumentLength;
+        } else {
+            expectedSize = UINT64_MAX;
+        }
+        long long layoutDelta = expectedSize <= LLONG_MAX
+            ? (long long)expectedSize - (long long)requestSize
+            : LLONG_MAX;
         size_t prefixLength = sizeof(workingDirectoryPrefix) - 1;
         size_t markerLength = sizeof(cacheMarker) - 1;
         size_t workingOffset = (size_t)-1;
@@ -848,6 +909,14 @@ static uintptr_t MacWSMTLCodeGenServiceBuildRequest(
                 bool steamHelperRequest =
                     MacWSIsSteamHelperWorkingDirectoryToken(
                         bytes + workingOffset, tokenLength);
+                bool sevenDaysUnityRequest =
+                    MacWSIsSevenDaysUnitySourceRequest(
+                        bytes + workingOffset, tokenLength,
+                        sourceLength, argumentLength, layoutDelta);
+                bool sevenDaysOverlayRequest =
+                    MacWSIsSevenDaysOverlaySourceRequest(
+                        bytes + workingOffset, tokenLength, requestSize,
+                        sourceLength, argumentLength, layoutDelta, sourceHash);
                 // Runtime-confirmed by request-3749-019 on 2026-08-19:
                 // Steam's in-game overlay compiles this source with nil
                 // MTLCompileOptions, so the request has no module-cache
@@ -887,6 +956,7 @@ static uintptr_t MacWSMTLCodeGenServiceBuildRequest(
                     argumentLength == 90 &&
                     sourceHash == UINT64_C(0xa90e497bcdffdc8d);
                 if ((chrootCacheRequest || steamHelperRequest ||
+                     sevenDaysUnityRequest || sevenDaysOverlayRequest ||
                      strayOverlayRequest || steamANGLEAssetBuild) &&
                     tokenLength >= targetLength) {
                     memcpy(bytes + workingOffset, targetArgument,
@@ -901,12 +971,6 @@ static uintptr_t MacWSMTLCodeGenServiceBuildRequest(
 
         if (sourceBoundsValid) {
             gReplySourceHash = sourceHash;
-            uint64_t expectedSize =
-                ((UINT64_C(16) + sourceLength + 7) & ~UINT64_C(7)) +
-                argumentLength;
-            long long layoutDelta = expectedSize <= LLONG_MAX
-                ? (long long)expectedSize - (long long)requestSize
-                : LLONG_MAX;
             if (adapted || diagnostics) {
                 MTLPatchLog("target adapter #%u request=%p total=%zu source=%llu sourceHash=%016llx args=%llu layoutDelta=%lld workingOffset=%lld cacheOffset=%lld adapted=%d cacheAdapter=%d",
                             sequence, request, requestSize,

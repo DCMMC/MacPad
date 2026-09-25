@@ -124,6 +124,210 @@ static BOOL macws_is_stray_process(void) {
     return isStray;
 }
 
+static BOOL macws_is_7dtd_process(void) {
+    static dispatch_once_t onceToken;
+    static BOOL isSevenDays = NO;
+    dispatch_once(&onceToken, ^{
+        const char *program = getprogname();
+        if (program && strcmp(program, "7 Days To Die") == 0) {
+            isSevenDays = YES;
+            return;
+        }
+        char executablePath[PATH_MAX] = {0};
+        uint32_t capacity = sizeof(executablePath);
+        if (_NSGetExecutablePath(executablePath, &capacity) == 0) {
+            const char *basename = strrchr(executablePath, '/');
+            basename = basename ? basename + 1 : executablePath;
+            isSevenDays = strcmp(basename, "7 Days To Die") == 0;
+        }
+    });
+    return isSevenDays;
+}
+
+// The iPad host presents a 1366x1024-point fullscreen scene at a 2x backing
+// scale. Runtime evidence from the exact arm64 Unity 2022.3.62f2 player on
+// iPad14,5 showed that its CAMetalLayer consequently changed from 1280x720 at
+// the main menu to 2732x2048 in gameplay; Player.log then reported
+// 18.27-21.57 FPS while the completed drawable itself remained visually
+// correct. Keep the application/window geometry unchanged and cap only that
+// exact game's public CAMetalLayer drawable size to one backing pixel per
+// logical point. MacWSHost performs the final native-Metal scale to the
+// physical panel. This is a rendering-resolution policy, not a validation or
+// command-buffer bypass, and is inert for WindowServer, Steam, Stray and every
+// other process unless the exact child environment opts in.
+static BOOL macws_7dtd_render_scale_compat_enabled(void) {
+    static dispatch_once_t onceToken;
+    static BOOL enabled = NO;
+    dispatch_once(&onceToken, ^{
+        const char *value = getenv("MACWS_7DTD_RENDER_SCALE_COMPAT");
+        enabled = macws_is_7dtd_process() && value &&
+            strcmp(value, "1") == 0;
+    });
+    return enabled;
+}
+
+static void macws_7dtd_apply_render_scale(id layer) {
+    if (!layer || !macws_7dtd_render_scale_compat_enabled() ||
+        ![layer respondsToSelector:@selector(drawableSize)] ||
+        ![layer respondsToSelector:@selector(setDrawableSize:)]) return;
+
+    CGSize requested = ((CGSize (*)(id, SEL))objc_msgSend)(
+        layer, @selector(drawableSize));
+    if (!isfinite(requested.width) || !isfinite(requested.height) ||
+        requested.width <= 0.0 || requested.height <= 0.0) return;
+
+    const double maximumWidth = 1366.0;
+    const double maximumHeight = 1024.0;
+    double factor = fmin(1.0, fmin(maximumWidth / requested.width,
+                                  maximumHeight / requested.height));
+    if (factor >= 0.999) return;
+
+    // Keep the producer's aspect ratio and use even pixel dimensions for the
+    // render-target family Unity builds around the drawable.
+    CGSize target = CGSizeMake(
+        fmax(2.0, floor((requested.width * factor) / 2.0) * 2.0),
+        fmax(2.0, floor((requested.height * factor) / 2.0) * 2.0));
+    ((void (*)(id, SEL, CGSize))objc_msgSend)(
+        layer, @selector(setDrawableSize:), target);
+    CGSize applied = ((CGSize (*)(id, SEL))objc_msgSend)(
+        layer, @selector(drawableSize));
+
+    static _Atomic uint64_t adjustmentCount = 0;
+    uint64_t count = atomic_fetch_add_explicit(
+        &adjustmentCount, 1, memory_order_relaxed) + 1;
+    if (count == 1 || count % 600 == 0) {
+        CGRect bounds = CGRectZero;
+        CGFloat contentsScale = 0.0;
+        if ([layer respondsToSelector:@selector(bounds)])
+            bounds = ((CGRect (*)(id, SEL))objc_msgSend)(
+                layer, @selector(bounds));
+        if ([layer respondsToSelector:@selector(contentsScale)])
+            contentsScale = ((CGFloat (*)(id, SEL))objc_msgSend)(
+                layer, @selector(contentsScale));
+        dprintf(STDERR_FILENO,
+            "#### MACWS-7DTD-RENDER-SCALE count=%llu requested=%.0fx%.0f "
+            "target=%.0fx%.0f applied=%.0fx%.0f bounds=%.1fx%.1f "
+            "contentsScale=%.3f\n",
+            (unsigned long long)count,
+            requested.width, requested.height, target.width, target.height,
+            applied.width, applied.height, bounds.size.width,
+            bounds.size.height, contentsScale);
+    }
+}
+
+static BOOL macws_is_render_paced_game_process(void) {
+    static dispatch_once_t onceToken;
+    static BOOL enabled = NO;
+    dispatch_once(&onceToken, ^{
+        enabled = macws_is_stray_process() || macws_is_7dtd_process();
+    });
+    return enabled;
+}
+
+// Read-only 7DTD drawable diagnostics. Unity can own more than one
+// CAMetalLayer over the lifetime of its player window; the direct-drawable
+// transport currently identifies a producer only by PID. Before changing
+// that protocol, record the actual layer/drawable relationship and a sparse
+// digest of each GPU-completed IOSurface. This path is exact-process and
+// marker gated, and never changes presentation or the published frame.
+static BOOL macws_7dtd_drawable_diag_enabled(void) {
+    static dispatch_once_t onceToken;
+    static BOOL enabled = NO;
+    dispatch_once(&onceToken, ^{
+        enabled = macws_is_7dtd_process() &&
+            access("/tmp/macws_7dtd_drawable_trace", F_OK) == 0;
+    });
+    return enabled;
+}
+
+typedef struct {
+    uintptr_t drawable;
+    uintptr_t layer;
+} MacWS7DTDDrawableLayerPair;
+
+static pthread_mutex_t g_macws_7dtd_drawable_layer_lock =
+    PTHREAD_MUTEX_INITIALIZER;
+static MacWS7DTDDrawableLayerPair g_macws_7dtd_drawable_layers[16] = {0};
+static uintptr_t g_macws_7dtd_unique_layers[8] = {0};
+static _Atomic uint64_t g_macws_7dtd_surface_diag_count = 0;
+
+static void macws_7dtd_note_drawable_layer(id drawable, id layer) {
+    if (!macws_7dtd_drawable_diag_enabled() || !drawable || !layer) return;
+    uintptr_t drawablePointer = (uintptr_t)(__bridge void *)drawable;
+    uintptr_t layerPointer = (uintptr_t)(__bridge void *)layer;
+    BOOL newLayer = NO;
+    pthread_mutex_lock(&g_macws_7dtd_drawable_layer_lock);
+    size_t pairSlot = sizeof(g_macws_7dtd_drawable_layers) /
+        sizeof(g_macws_7dtd_drawable_layers[0]);
+    for (size_t i = 0; i < sizeof(g_macws_7dtd_drawable_layers) /
+            sizeof(g_macws_7dtd_drawable_layers[0]); i++) {
+        if (g_macws_7dtd_drawable_layers[i].drawable == drawablePointer ||
+            (pairSlot == sizeof(g_macws_7dtd_drawable_layers) /
+                sizeof(g_macws_7dtd_drawable_layers[0]) &&
+             g_macws_7dtd_drawable_layers[i].drawable == 0)) {
+            pairSlot = i;
+            if (g_macws_7dtd_drawable_layers[i].drawable == drawablePointer)
+                break;
+        }
+    }
+    if (pairSlot < sizeof(g_macws_7dtd_drawable_layers) /
+            sizeof(g_macws_7dtd_drawable_layers[0])) {
+        g_macws_7dtd_drawable_layers[pairSlot] =
+            (MacWS7DTDDrawableLayerPair){drawablePointer, layerPointer};
+    }
+    for (size_t i = 0; i < sizeof(g_macws_7dtd_unique_layers) /
+            sizeof(g_macws_7dtd_unique_layers[0]); i++) {
+        if (g_macws_7dtd_unique_layers[i] == layerPointer) break;
+        if (g_macws_7dtd_unique_layers[i] == 0) {
+            g_macws_7dtd_unique_layers[i] = layerPointer;
+            newLayer = YES;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_macws_7dtd_drawable_layer_lock);
+    if (!newLayer) return;
+
+    CGSize drawableSize = CGSizeZero;
+    CGFloat contentsScale = 0.0;
+    id delegate = nil;
+    @try {
+        if ([layer respondsToSelector:@selector(drawableSize)])
+            drawableSize = ((CGSize (*)(id, SEL))objc_msgSend)(
+                layer, @selector(drawableSize));
+        if ([layer respondsToSelector:@selector(contentsScale)])
+            contentsScale = ((CGFloat (*)(id, SEL))objc_msgSend)(
+                layer, @selector(contentsScale));
+        if ([layer respondsToSelector:@selector(delegate)])
+            delegate = ((id (*)(id, SEL))objc_msgSend)(
+                layer, @selector(delegate));
+    } @catch (__unused NSException *exception) {
+    }
+    dprintf(STDERR_FILENO,
+        "#### 7DTD-DRAWABLE-LAYER layer=%p class=%s delegate=%p/%s "
+        "drawable=%p size=%.0fx%.0f scale=%.3f\n",
+        (void *)layerPointer, class_getName([layer class]),
+        (__bridge void *)delegate,
+        delegate ? class_getName([delegate class]) : "(nil)",
+        (void *)drawablePointer, drawableSize.width, drawableSize.height,
+        contentsScale);
+}
+
+static uintptr_t macws_7dtd_layer_for_drawable(id drawable) {
+    if (!macws_7dtd_drawable_diag_enabled() || !drawable) return 0;
+    uintptr_t drawablePointer = (uintptr_t)(__bridge void *)drawable;
+    uintptr_t layerPointer = 0;
+    pthread_mutex_lock(&g_macws_7dtd_drawable_layer_lock);
+    for (size_t i = 0; i < sizeof(g_macws_7dtd_drawable_layers) /
+            sizeof(g_macws_7dtd_drawable_layers[0]); i++) {
+        if (g_macws_7dtd_drawable_layers[i].drawable == drawablePointer) {
+            layerPointer = g_macws_7dtd_drawable_layers[i].layer;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_macws_7dtd_drawable_layer_lock);
+    return layerPointer;
+}
+
 static BOOL macws_stray_agx_compat_enabled(void) {
     static dispatch_once_t onceToken;
     static BOOL enabled = NO;
@@ -145,7 +349,7 @@ static BOOL macws_stray_agx_compat_enabled(void) {
 // returns naturally to the cool idle cadence.  This neither fabricates a
 // drawable nor reports completion early.
 static void macws_stray_note_render_activity(void) {
-    if (!macws_is_stray_process()) return;
+    if (!macws_is_render_paced_game_process()) return;
     struct timespec now = {0};
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return;
     uint64_t now_ns = (uint64_t)now.tv_sec * NSEC_PER_SEC +
@@ -218,8 +422,11 @@ static BOOL macws_stray_full_render_trace_enabled(void) {
     static dispatch_once_t onceToken;
     static BOOL enabled = NO;
     dispatch_once(&onceToken, ^{
-        enabled = macws_is_stray_process() &&
-            access("/tmp/macws_stray_render_trace", F_OK) == 0;
+        enabled =
+            (macws_is_stray_process() &&
+             access("/tmp/macws_stray_render_trace", F_OK) == 0) ||
+            (macws_is_7dtd_process() &&
+             access("/tmp/macws_7dtd_render_trace", F_OK) == 0);
     });
     return enabled;
 }
@@ -539,10 +746,59 @@ static void macws_invalidate_catalyst_drawable_service(
     pthread_mutex_unlock(&macws_catalyst_drawable_service_lock);
 }
 
+static void macws_7dtd_trace_completed_surface(
+        const MacWSCatalystDrawableRecord *record,
+        IOSurfaceRef surface, uintptr_t layerPointer,
+        uintptr_t drawablePointer, uintptr_t texturePointer) {
+    if (!macws_7dtd_drawable_diag_enabled() || !record || !surface) return;
+    uint64_t sample = atomic_fetch_add_explicit(
+        &g_macws_7dtd_surface_diag_count, 1, memory_order_relaxed) + 1;
+    if (sample > 12 && sample % 120 != 0) return;
+
+    int lockResult = IOSurfaceLock(
+        surface, kIOSurfaceLockReadOnly, NULL);
+    const uint8_t *base = lockResult == 0
+        ? (const uint8_t *)IOSurfaceGetBaseAddress(surface) : NULL;
+    size_t width = IOSurfaceGetWidth(surface);
+    size_t height = IOSurfaceGetHeight(surface);
+    size_t bytesPerRow = IOSurfaceGetBytesPerRow(surface);
+    uint64_t hash = 1469598103934665603ull;
+    size_t sampled = 0;
+    if (base && width > 0 && height > 0 && bytesPerRow >= width * 4) {
+        size_t stepX = width > 64 ? width / 64 : 1;
+        size_t stepY = height > 36 ? height / 36 : 1;
+        for (size_t y = 0; y < height; y += stepY) {
+            const uint32_t *row = (const uint32_t *)(base + y * bytesPerRow);
+            for (size_t x = 0; x < width; x += stepX) {
+                hash ^= row[x];
+                hash *= 1099511628211ull;
+                sampled++;
+            }
+        }
+    }
+    if (lockResult == 0)
+        IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+    dprintf(STDERR_FILENO,
+        "#### 7DTD-DRAWABLE-SURFACE sample=%llu sequence=%llu layer=%p "
+        "drawable=%p texture=%p surface=%u size=%zux%zu bpr=%zu "
+        "lock=%d pixels=%zu "
+        "hash=%016llx\n",
+        (unsigned long long)sample,
+        (unsigned long long)record->sequence, (void *)layerPointer,
+        (void *)drawablePointer, (void *)texturePointer,
+        IOSurfaceGetID(surface), width, height, bytesPerRow,
+        lockResult, sampled, (unsigned long long)hash);
+}
+
 static void macws_publish_completed_catalyst_drawable(
-        MacWSCatalystDrawableRecord record, IOSurfaceRef retainedSurface) {
+        MacWSCatalystDrawableRecord record, IOSurfaceRef retainedSurface,
+        uintptr_t layerPointer, uintptr_t drawablePointer,
+        uintptr_t texturePointer) {
     if (!retainedSurface) return;
     record.completionTime = mach_absolute_time();
+    macws_7dtd_trace_completed_surface(
+        &record, retainedSurface, layerPointer,
+        drawablePointer, texturePointer);
     // Transfer one explicit cross-process IOSurface use count with the Mach
     // right.  Retaining the CF object alone did not prevent CAMetalLayer from
     // recycling its drawable storage after presentation; Host screenshots
@@ -725,9 +981,23 @@ static void macws_before_present_drawable(id commandBuffer, SEL selector,
         [commandBuffer respondsToSelector:@selector(addCompletedHandler:)]) {
         IOSurfaceRef surfaceForCompletion = retainedSurface;
         MacWSCatalystDrawableRecord recordForCompletion = record;
+        uintptr_t layerForCompletion =
+            macws_7dtd_layer_for_drawable(drawable);
+        uintptr_t drawableForCompletion =
+            (uintptr_t)(__bridge void *)drawable;
+        uintptr_t textureForCompletion = 0;
+        @try {
+            id texture = drawable &&
+                    [drawable respondsToSelector:@selector(texture)]
+                ? [drawable texture] : nil;
+            textureForCompletion = (uintptr_t)(__bridge void *)texture;
+        } @catch (__unused NSException *exception) {
+        }
         [commandBuffer addCompletedHandler:^(__unused id completed) {
             macws_publish_completed_catalyst_drawable(
-                recordForCompletion, surfaceForCompletion);
+                recordForCompletion, surfaceForCompletion,
+                layerForCompletion, drawableForCompletion,
+                textureForCompletion);
         }];
     } else if (retainedSurface) {
         CFRelease(retainedSurface);
@@ -934,9 +1204,17 @@ static void macws_publish_direct_drawable_after_presentation(id drawable,
                     &record, sizeof(record))) {
                 IOSurfaceRef surfaceForPresentation = retainedSurface;
                 MacWSCatalystDrawableRecord recordForPresentation = record;
+                uintptr_t layerForPresentation =
+                    macws_7dtd_layer_for_drawable(drawable);
+                uintptr_t drawableForPresentation =
+                    (uintptr_t)(__bridge void *)drawable;
+                uintptr_t textureForPresentation =
+                    (uintptr_t)(__bridge void *)texture;
                 [drawable addPresentedHandler:^(__unused id presented) {
                     macws_publish_completed_catalyst_drawable(
-                        recordForPresentation, surfaceForPresentation);
+                        recordForPresentation, surfaceForPresentation,
+                        layerForPresentation, drawableForPresentation,
+                        textureForPresentation);
                 }];
                 retainedSurface = NULL;
                 boundary = "drawable-publish-ready";
@@ -1068,6 +1346,7 @@ static void macws_install_stray_drawable_class_trace(Class drawableClass) {
 }
 
 static id macws_stray_next_drawable_trace(id layer, SEL selector) {
+    macws_7dtd_apply_render_scale(layer);
     if (macws_stray_disable_display_sync_enabled() &&
         [layer respondsToSelector:@selector(displaySyncEnabled)] &&
         [layer respondsToSelector:@selector(setDisplaySyncEnabled:)]) {
@@ -1097,6 +1376,7 @@ static id macws_stray_next_drawable_trace(id layer, SEL selector) {
     uint64_t begin = timing ? mach_absolute_time() : 0;
     id drawable = g_macws_stray_next_drawable_orig
         ? g_macws_stray_next_drawable_orig(layer, selector) : nil;
+    if (drawable) macws_7dtd_note_drawable_layer(drawable, layer);
     if (timing) {
         uint64_t elapsed = mach_absolute_time() - begin;
         uint64_t count = atomic_fetch_add_explicit(
@@ -17122,6 +17402,7 @@ typedef struct {
 static MacWSStrayCommandRenderTargets
     g_macws_stray_command_targets[MACWS_STRAY_RT_COMMAND_CAP];
 static _Atomic uint32_t g_macws_stray_rt_capture_batch = 0;
+static _Atomic bool g_macws_stray_rt_capture_marker_was_present = false;
 
 typedef void (*macws_set_render_pipeline_fn)(id, SEL, id);
 typedef void (*macws_draw_primitives_fn)(
@@ -17186,6 +17467,24 @@ static size_t g_macws_stray_depth_state_count = 0;
 typedef id (*macws_stray_render_encoder_fn)(id, SEL, id);
 static macws_stray_render_encoder_fn
     g_macws_stray_render_encoder_orig = NULL;
+typedef id (*macws_7dtd_blit_encoder_create_fn)(id, SEL);
+typedef void (*macws_7dtd_blit_texture_to_texture_fn)(
+    id, SEL, id, NSUInteger, NSUInteger, MTLOrigin, MTLSize,
+    id, NSUInteger, NSUInteger, MTLOrigin);
+typedef void (*macws_7dtd_blit_texture_to_buffer_fn)(
+    id, SEL, id, NSUInteger, NSUInteger, MTLOrigin, MTLSize,
+    id, NSUInteger, NSUInteger, NSUInteger);
+typedef void (*macws_7dtd_blit_buffer_to_texture_fn)(
+    id, SEL, id, NSUInteger, NSUInteger, NSUInteger, MTLSize,
+    id, NSUInteger, NSUInteger, MTLOrigin);
+static macws_7dtd_blit_encoder_create_fn
+    g_macws_7dtd_blit_encoder_create_orig = NULL;
+static macws_7dtd_blit_texture_to_texture_fn
+    g_macws_7dtd_blit_texture_to_texture_orig = NULL;
+static macws_7dtd_blit_texture_to_buffer_fn
+    g_macws_7dtd_blit_texture_to_buffer_orig = NULL;
+static macws_7dtd_blit_buffer_to_texture_fn
+    g_macws_7dtd_blit_buffer_to_texture_orig = NULL;
 typedef id (*macws_stray_queue_command_buffer_fn)(id, SEL);
 typedef id (*macws_stray_queue_command_buffer_descriptor_fn)(
     id, SEL, MTLCommandBufferDescriptor *);
@@ -17200,6 +17499,7 @@ static macws_stray_command_commit_fn g_macws_stray_command_commit_orig = NULL;
 typedef void (*macws_stray_end_encoding_fn)(id, SEL);
 static macws_stray_end_encoding_fn g_macws_stray_end_encoding_orig = NULL;
 static void macws_install_stray_concrete_end_encoding(id encoder);
+static void macws_install_7dtd_concrete_blit_trace(id encoder);
 
 static void macws_stray_remember_render_target(
         id commandBuffer, id texture, NSUInteger attachment,
@@ -17559,6 +17859,228 @@ static id macws_stray_render_encoder_trace(id self, SEL selector,
     return encoder;
 }
 
+// Read-only tail-copy witness for the native-arm64 Unity player.  The render
+// pass trace proves that the world and post-processing passes execute, but
+// Unity may transfer its final backbuffer to CAMetalDrawable through a blit
+// encoder.  Install only for the explicit 7DTD render diagnostic and log only
+// while the separately controlled active marker exists.  Every call and
+// argument is forwarded unchanged.
+static BOOL macws_7dtd_blit_trace_active(void) {
+    return macws_is_7dtd_process() &&
+        access("/tmp/macws_7dtd_blit_trace_active", F_OK) == 0;
+}
+
+static void macws_7dtd_texture_witness(
+        id texture, NSUInteger *width, NSUInteger *height,
+        NSUInteger *pixelFormat, uint32_t *surfaceID) {
+    if (width) *width = 0;
+    if (height) *height = 0;
+    if (pixelFormat) *pixelFormat = 0;
+    if (surfaceID) *surfaceID = 0;
+    if (!texture) return;
+    @try {
+        if (width) *width = [texture width];
+        if (height) *height = [texture height];
+        if (pixelFormat) *pixelFormat = [texture pixelFormat];
+        if (surfaceID && [texture respondsToSelector:@selector(iosurface)]) {
+            IOSurfaceRef surface = (IOSurfaceRef)[texture iosurface];
+            if (surface) *surfaceID = IOSurfaceGetID(surface);
+        }
+    } @catch (__unused NSException *exception) {
+    }
+}
+
+static BOOL macws_7dtd_blit_log_slot(uint64_t *sequenceOut) {
+    if (!macws_7dtd_blit_trace_active()) return NO;
+    static _Atomic uint64_t sequence = 0;
+    uint64_t value = atomic_fetch_add_explicit(
+        &sequence, 1, memory_order_relaxed) + 1;
+    if (sequenceOut) *sequenceOut = value;
+    return value <= 1024;
+}
+
+static void macws_7dtd_blit_texture_to_texture_trace(
+        id self, SEL selector, id source, NSUInteger sourceSlice,
+        NSUInteger sourceLevel, MTLOrigin sourceOrigin, MTLSize sourceSize,
+        id destination, NSUInteger destinationSlice,
+        NSUInteger destinationLevel, MTLOrigin destinationOrigin) {
+    uint64_t sequence = 0;
+    if (macws_7dtd_blit_log_slot(&sequence)) {
+        NSUInteger sw = 0, sh = 0, sf = 0, dw = 0, dh = 0, df = 0;
+        uint32_t ss = 0, ds = 0;
+        macws_7dtd_texture_witness(source, &sw, &sh, &sf, &ss);
+        macws_7dtd_texture_witness(destination, &dw, &dh, &df, &ds);
+        dprintf(STDERR_FILENO,
+            "#### 7DTD-BLIT #%llu kind=texture-to-texture encoder=%p "
+            "src=%p/%lux%lu/pf%lu/surface%u slice=%lu level=%lu "
+            "origin=%lux%lux%lu size=%lux%lux%lu "
+            "dst=%p/%lux%lu/pf%lu/surface%u slice=%lu level=%lu "
+            "origin=%lux%lux%lu\n",
+            (unsigned long long)sequence, (__bridge void *)self,
+            (__bridge void *)source, (unsigned long)sw,
+            (unsigned long)sh, (unsigned long)sf, ss,
+            (unsigned long)sourceSlice, (unsigned long)sourceLevel,
+            (unsigned long)sourceOrigin.x, (unsigned long)sourceOrigin.y,
+            (unsigned long)sourceOrigin.z, (unsigned long)sourceSize.width,
+            (unsigned long)sourceSize.height,
+            (unsigned long)sourceSize.depth,
+            (__bridge void *)destination, (unsigned long)dw,
+            (unsigned long)dh, (unsigned long)df, ds,
+            (unsigned long)destinationSlice,
+            (unsigned long)destinationLevel,
+            (unsigned long)destinationOrigin.x,
+            (unsigned long)destinationOrigin.y,
+            (unsigned long)destinationOrigin.z);
+    }
+    if (g_macws_7dtd_blit_texture_to_texture_orig)
+        g_macws_7dtd_blit_texture_to_texture_orig(
+            self, selector, source, sourceSlice, sourceLevel,
+            sourceOrigin, sourceSize, destination, destinationSlice,
+            destinationLevel, destinationOrigin);
+}
+
+static void macws_7dtd_blit_texture_to_buffer_trace(
+        id self, SEL selector, id source, NSUInteger sourceSlice,
+        NSUInteger sourceLevel, MTLOrigin sourceOrigin, MTLSize sourceSize,
+        id destination, NSUInteger destinationOffset,
+        NSUInteger destinationBytesPerRow,
+        NSUInteger destinationBytesPerImage) {
+    uint64_t sequence = 0;
+    if (macws_7dtd_blit_log_slot(&sequence)) {
+        NSUInteger sw = 0, sh = 0, sf = 0;
+        uint32_t ss = 0;
+        macws_7dtd_texture_witness(source, &sw, &sh, &sf, &ss);
+        dprintf(STDERR_FILENO,
+            "#### 7DTD-BLIT #%llu kind=texture-to-buffer encoder=%p "
+            "src=%p/%lux%lu/pf%lu/surface%u size=%lux%lux%lu "
+            "dst=%p offset=%lu bpr=%lu bpi=%lu\n",
+            (unsigned long long)sequence, (__bridge void *)self,
+            (__bridge void *)source, (unsigned long)sw,
+            (unsigned long)sh, (unsigned long)sf, ss,
+            (unsigned long)sourceSize.width,
+            (unsigned long)sourceSize.height,
+            (unsigned long)sourceSize.depth,
+            (__bridge void *)destination,
+            (unsigned long)destinationOffset,
+            (unsigned long)destinationBytesPerRow,
+            (unsigned long)destinationBytesPerImage);
+    }
+    if (g_macws_7dtd_blit_texture_to_buffer_orig)
+        g_macws_7dtd_blit_texture_to_buffer_orig(
+            self, selector, source, sourceSlice, sourceLevel,
+            sourceOrigin, sourceSize, destination, destinationOffset,
+            destinationBytesPerRow, destinationBytesPerImage);
+}
+
+static void macws_7dtd_blit_buffer_to_texture_trace(
+        id self, SEL selector, id source, NSUInteger sourceOffset,
+        NSUInteger sourceBytesPerRow, NSUInteger sourceBytesPerImage,
+        MTLSize sourceSize, id destination, NSUInteger destinationSlice,
+        NSUInteger destinationLevel, MTLOrigin destinationOrigin) {
+    uint64_t sequence = 0;
+    if (macws_7dtd_blit_log_slot(&sequence)) {
+        NSUInteger dw = 0, dh = 0, df = 0;
+        uint32_t ds = 0;
+        macws_7dtd_texture_witness(destination, &dw, &dh, &df, &ds);
+        dprintf(STDERR_FILENO,
+            "#### 7DTD-BLIT #%llu kind=buffer-to-texture encoder=%p "
+            "src=%p offset=%lu bpr=%lu bpi=%lu size=%lux%lux%lu "
+            "dst=%p/%lux%lu/pf%lu/surface%u slice=%lu level=%lu\n",
+            (unsigned long long)sequence, (__bridge void *)self,
+            (__bridge void *)source, (unsigned long)sourceOffset,
+            (unsigned long)sourceBytesPerRow,
+            (unsigned long)sourceBytesPerImage,
+            (unsigned long)sourceSize.width,
+            (unsigned long)sourceSize.height,
+            (unsigned long)sourceSize.depth,
+            (__bridge void *)destination, (unsigned long)dw,
+            (unsigned long)dh, (unsigned long)df, ds,
+            (unsigned long)destinationSlice,
+            (unsigned long)destinationLevel);
+    }
+    if (g_macws_7dtd_blit_buffer_to_texture_orig)
+        g_macws_7dtd_blit_buffer_to_texture_orig(
+            self, selector, source, sourceOffset, sourceBytesPerRow,
+            sourceBytesPerImage, sourceSize, destination,
+            destinationSlice, destinationLevel, destinationOrigin);
+}
+
+static void macws_install_7dtd_concrete_blit_trace(id encoder) {
+    if (!encoder || !macws_is_7dtd_process() ||
+        !macws_stray_full_render_trace_enabled()) return;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class concrete = [encoder class];
+        unsigned int methodCount = 0;
+        Method *methods = class_copyMethodList(concrete, &methodCount);
+        for (unsigned int index = 0; methods && index < methodCount; index++) {
+            const char *name = sel_getName(method_getName(methods[index]));
+            if (name && (strstr(name, "copy") || strstr(name, "Copy") ||
+                         strstr(name, "synchronize"))) {
+                dprintf(STDERR_FILENO,
+                    "#### 7DTD-BLIT-METHOD class=%s selector=%s types=%s\n",
+                    class_getName(concrete), name,
+                    method_getTypeEncoding(methods[index]) ?: "(nil)");
+            }
+        }
+        if (methods) free(methods);
+
+        struct {
+            const char *name;
+            IMP replacement;
+            IMP *original;
+        } entries[] = {
+            { "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:"
+              "sourceSize:toTexture:destinationSlice:destinationLevel:"
+              "destinationOrigin:",
+              (IMP)macws_7dtd_blit_texture_to_texture_trace,
+              (IMP *)&g_macws_7dtd_blit_texture_to_texture_orig },
+            { "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:"
+              "sourceSize:toBuffer:destinationOffset:"
+              "destinationBytesPerRow:destinationBytesPerImage:",
+              (IMP)macws_7dtd_blit_texture_to_buffer_trace,
+              (IMP *)&g_macws_7dtd_blit_texture_to_buffer_orig },
+            { "copyFromBuffer:sourceOffset:sourceBytesPerRow:"
+              "sourceBytesPerImage:sourceSize:toTexture:destinationSlice:"
+              "destinationLevel:destinationOrigin:",
+              (IMP)macws_7dtd_blit_buffer_to_texture_trace,
+              (IMP *)&g_macws_7dtd_blit_buffer_to_texture_orig },
+        };
+        for (size_t index = 0;
+             index < sizeof(entries) / sizeof(entries[0]); index++) {
+            SEL selector = sel_registerName(entries[index].name);
+            Method method = class_getInstanceMethod(concrete, selector);
+            if (!method) {
+                dprintf(STDERR_FILENO,
+                    "#### 7DTD-BLIT missing class=%s selector=%s\n",
+                    class_getName(concrete), entries[index].name);
+                continue;
+            }
+            *entries[index].original = method_getImplementation(method);
+            const char *types = method_getTypeEncoding(method);
+            BOOL added = class_addMethod(
+                concrete, selector, entries[index].replacement, types);
+            if (!added) {
+                Method own = class_getInstanceMethod(concrete, selector);
+                method_setImplementation(own, entries[index].replacement);
+            }
+            dprintf(STDERR_FILENO,
+                "#### 7DTD-BLIT installed class=%s selector=%s "
+                "original=%p subclassOverride=%s types=%s\n",
+                class_getName(concrete), entries[index].name,
+                (void *)*entries[index].original,
+                added ? "YES" : "NO", types ?: "(nil)");
+        }
+    });
+}
+
+static id macws_7dtd_blit_encoder_create_trace(id self, SEL selector) {
+    id encoder = g_macws_7dtd_blit_encoder_create_orig
+        ? g_macws_7dtd_blit_encoder_create_orig(self, selector) : nil;
+    macws_install_7dtd_concrete_blit_trace(encoder);
+    return encoder;
+}
+
 static NSUInteger macws_stray_bytes_per_pixel(NSUInteger pixelFormat) {
     switch (pixelFormat) {
         case 10: case 11: case 12:      // R8 family
@@ -17613,6 +18135,15 @@ static void macws_stray_command_commit_trace(id self, SEL selector) {
 
     BOOL captureRequested =
         access("/tmp/macws_stray_rt_capture_now", F_OK) == 0;
+    bool markerWasPresent = atomic_exchange_explicit(
+        &g_macws_stray_rt_capture_marker_was_present,
+        captureRequested, memory_order_acq_rel);
+    if (!captureRequested && markerWasPresent) {
+        atomic_store_explicit(
+            &g_macws_stray_rt_capture_batch, 0, memory_order_release);
+        dprintf(STDERR_FILENO,
+            "#### STRAY-RT-CAPTURE rearmed after marker removal\n");
+    }
     uint32_t captureBatch = UINT32_MAX;
     if (captureRequested &&
         (candidateCount > 0 || bufferCandidateCount > 0))
@@ -17806,6 +18337,35 @@ static void macws_stray_command_commit_trace(id self, SEL selector) {
     }
     if (g_macws_stray_command_commit_orig)
         g_macws_stray_command_commit_orig(self, selector);
+
+    // Diagnostic only: serialize 7DTD command buffers after their unmodified
+    // commit to test whether the pf115 producer -> Hidden/BlitCopy consumer
+    // failure is an inter-command dependency problem.  This deliberately
+    // sacrifices throughput and is never enabled by production environment
+    // or plist state.  A visible recovery under this marker is evidence for
+    // fixing the missing fence/hazard edge, not a shippable FPS workaround.
+    if (macws_is_7dtd_process() &&
+        access("/tmp/macws_7dtd_force_serial_submit", F_OK) == 0) {
+        [self waitUntilCompleted];
+        static _Atomic uint64_t serialWaits = 0;
+        uint64_t serialWait = atomic_fetch_add_explicit(
+            &serialWaits, 1, memory_order_relaxed) + 1;
+        if (serialWait <= 32 || (serialWait % 600) == 0) {
+            NSError *error = nil;
+            NSUInteger status = 0;
+            @try {
+                status = [self status];
+                error = [self error];
+            } @catch (__unused NSException *exception) {
+            }
+            dprintf(STDERR_FILENO,
+                "#### 7DTD-SERIAL-SUBMIT wait=%llu command=%p "
+                "status=%lu error=%s\n",
+                (unsigned long long)serialWait, (__bridge void *)self,
+                (unsigned long)status,
+                error.description.UTF8String ?: "(nil)");
+        }
+    }
 
     // Read-only join between the public Metal command-buffer boundary and
     // the exact parser-facing submit serial.  AGX recycles Objective-C
@@ -18388,6 +18948,73 @@ static void macws_stray_log_first_draw(id encoder, SEL selector,
     BOOL firstDraw = NO;
     uintptr_t pipeline = macws_stray_trace_pipeline_for_draw(
         encoder, &firstDraw);
+    if (pipeline && macws_is_7dtd_process() &&
+        access("/tmp/macws_7dtd_tail_input_trace", F_OK) == 0) {
+        BOOL finalCopy = NO;
+        const char *labelText = "(nil)";
+        @try {
+            id pipelineObject = (__bridge id)(void *)pipeline;
+            NSString *label = [pipelineObject respondsToSelector:@selector(label)]
+                ? [pipelineObject label] : nil;
+            finalCopy = [label isEqualToString:@"Hidden/BlitCopy"];
+            if (label) labelText = label.UTF8String;
+        } @catch (__unused NSException *exception) {
+        }
+        static _Atomic uint32_t tailDrawSequence = 0;
+        uint32_t tailDraw = finalCopy ? atomic_fetch_add_explicit(
+            &tailDrawSequence, 1, memory_order_relaxed) + 1 : 0;
+        if (finalCopy && tailDraw <= 64) {
+            MacWSStrayEncoderPipeline target = {0};
+            uintptr_t encoderValue = (uintptr_t)(__bridge void *)encoder;
+            pthread_mutex_lock(&g_macws_stray_render_trace_lock);
+            for (size_t i = 0;
+                 i < g_macws_stray_encoder_pipeline_count; i++) {
+                if (g_macws_stray_encoder_pipelines[i].encoder ==
+                    encoderValue) {
+                    target = g_macws_stray_encoder_pipelines[i];
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&g_macws_stray_render_trace_lock);
+            dprintf(STDERR_FILENO,
+                "#### 7DTD-TAIL-DRAW #%u encoder=%p pipeline=%p label=%s "
+                "selector=%s count=%lu instances=%lu "
+                "target=%p/%ux%u/pf%u\n",
+                tailDraw, (__bridge void *)encoder, (void *)pipeline,
+                labelText, sel_getName(selector), (unsigned long)count,
+                (unsigned long)instances, (void *)target.colorTexture,
+                target.colorWidth, target.colorHeight, target.colorFormat);
+            for (uint32_t index = 0;
+                 index < MACWS_STRAY_FRAGMENT_TEXTURE_CAP; index++) {
+                uintptr_t value = target.fragmentTextures[index];
+                if (!value) continue;
+                id texture = (__bridge id)(void *)value;
+                NSUInteger width = 0, height = 0, format = 0;
+                uint32_t surfaceID = 0;
+                macws_7dtd_texture_witness(
+                    texture, &width, &height, &format, &surfaceID);
+                dprintf(STDERR_FILENO,
+                    "#### 7DTD-TAIL-TEXTURE draw=%u index=%u "
+                    "texture=%p size=%lux%lu pf=%lu surface=%u\n",
+                    tailDraw, index, (void *)value,
+                    (unsigned long)width, (unsigned long)height,
+                    (unsigned long)format, surfaceID);
+            }
+            for (uint32_t index = 0;
+                 index < MACWS_STRAY_FRAGMENT_BUFFER_CAP; index++) {
+                MacWSStrayBufferBinding binding =
+                    target.fragmentBuffers[index];
+                if (!binding.buffer && !target.fragmentInlineLengths[index])
+                    continue;
+                dprintf(STDERR_FILENO,
+                    "#### 7DTD-TAIL-BUFFER draw=%u index=%u buffer=%p "
+                    "offset=%llu inline=%u\n",
+                    tailDraw, index, (void *)binding.buffer,
+                    (unsigned long long)binding.offset,
+                    target.fragmentInlineLengths[index]);
+            }
+        }
+    }
     if (firstDraw) {
         MacWSStrayEncoderPipeline target = {0};
         uintptr_t encoderValue = (uintptr_t)(__bridge void *)encoder;
@@ -19614,7 +20241,7 @@ static void macws_install_stray_concrete_end_encoding(id encoder) {
 // wrappers whenever present telemetry is requested.  The full render trace
 // below recognizes the same IMPs and will not wrap them twice.
 static void macws_install_stray_agx_present_trace(void) {
-    if (!macws_is_stray_process()) return;
+    if (!macws_is_render_paced_game_process()) return;
     // UE can present either by asking the command buffer to schedule a
     // drawable or by calling the concrete CAMetalDrawable directly.  The
     // low-overhead cadence witness must cover both public presentation paths;
@@ -20102,6 +20729,38 @@ static void macws_install_stray_render_execution_trace(void) {
             "#### STRAY-RENDER missing selector=%s class=%s\n",
             sel_getName(renderSelector),
             commandBuffer ? class_getName(commandBuffer) : "(nil)");
+    }
+
+    if (macws_is_7dtd_process()) {
+        SEL blitSelector = sel_registerName("blitCommandEncoder");
+        Method blitMethod = commandBuffer
+            ? class_getInstanceMethod(commandBuffer, blitSelector) : NULL;
+        if (blitMethod) {
+            g_macws_7dtd_blit_encoder_create_orig =
+                (macws_7dtd_blit_encoder_create_fn)
+                method_getImplementation(blitMethod);
+            const char *types = method_getTypeEncoding(blitMethod);
+            BOOL added = class_addMethod(
+                commandBuffer, blitSelector,
+                (IMP)macws_7dtd_blit_encoder_create_trace, types);
+            if (!added) {
+                Method own = class_getInstanceMethod(
+                    commandBuffer, blitSelector);
+                method_setImplementation(
+                    own, (IMP)macws_7dtd_blit_encoder_create_trace);
+            }
+            dprintf(STDERR_FILENO,
+                "#### 7DTD-BLIT installed class=%s selector=%s "
+                "original=%p subclassOverride=%s types=%s\n",
+                class_getName(commandBuffer), sel_getName(blitSelector),
+                (void *)g_macws_7dtd_blit_encoder_create_orig,
+                added ? "YES" : "NO", types ?: "(nil)");
+        } else {
+            dprintf(STDERR_FILENO,
+                "#### 7DTD-BLIT missing class=%s selector=%s\n",
+                commandBuffer ? class_getName(commandBuffer) : "(nil)",
+                sel_getName(blitSelector));
+        }
     }
 
     macws_install_stray_compute_execution_trace(commandBuffer);
@@ -22605,10 +23264,22 @@ static const char *macws_private_chroot_service_name(const char *name) {
         return "com.apple.macosbooter.systemstatus.activityattribution";
     if (!strcmp(name, "com.apple.coreservices.launchservicesd"))
         return "com.apple.macosbooter.coreservices.launchservicesd";
-    if (!strcmp(name, "com.apple.cfprefsd.daemon"))
+    if (!strcmp(name, "com.apple.cfprefsd.daemon")) {
+        const char *mobileIdentity =
+            getenv("MACWS_SYNTHETIC_MOBILE_USER");
+        if (geteuid() == 501 && mobileIdentity &&
+            strcmp(mobileIdentity, "1") == 0)
+            return "com.apple.macosbooter.cfprefsd.agent.501";
         return "com.apple.macosbooter.cfprefsd.daemon";
-    if (!strcmp(name, "com.apple.cfprefsd.agent"))
+    }
+    if (!strcmp(name, "com.apple.cfprefsd.agent")) {
+        const char *mobileIdentity =
+            getenv("MACWS_SYNTHETIC_MOBILE_USER");
+        if (geteuid() == 501 && mobileIdentity &&
+            strcmp(mobileIdentity, "1") == 0)
+            return "com.apple.macosbooter.cfprefsd.agent.501";
         return "com.apple.macosbooter.cfprefsd.agent";
+    }
     if (!strcmp(name, "com.apple.audio.AudioComponentRegistrar"))
         return "com.apple.macosbooter.audio.AudioComponentRegistrar";
     if (!strcmp(name, "com.apple.iconservices"))

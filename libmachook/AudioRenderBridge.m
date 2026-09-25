@@ -6,12 +6,15 @@
 #include <fcntl.h>
 #include <mach-o/dyld.h>
 #include <mach/mach_time.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "macws_audio_bridge.h"
@@ -22,21 +25,95 @@ typedef OSStatus (*MacWSAudioUnitSetPropertyFn)(
 typedef OSStatus (*MacWSAudioUnitGetPropertyFn)(
     AudioUnit, AudioUnitPropertyID, AudioUnitScope, AudioUnitElement,
     void *, UInt32 *);
+typedef OSStatus (*MacWSAudioOutputUnitStartFn)(AudioUnit);
+typedef OSStatus (*MacWSAudioOutputUnitStopFn)(AudioUnit);
+typedef OSStatus (*MacWSAudioComponentInstanceDisposeFn)(AudioComponentInstance);
 
-typedef struct {
+typedef struct MacWSAudioRenderContext {
     AURenderCallback original;
     void *originalContext;
+    AudioUnit unit;
     AudioStreamBasicDescription format;
     MacWSAudioRingHeader *ring;
     uint64_t producerToken;
+    _Atomic(bool) softwareCadenceRunning;
+    bool softwareCadenceThreadCreated;
+    pthread_t softwareCadenceThread;
+    struct MacWSAudioRenderContext *next;
     int16_t scratch[4096 * MACWS_AUDIO_CHANNELS];
 } MacWSAudioRenderContext;
 
 static MacWSAudioUnitSetPropertyFn gMacWSOriginalAudioUnitSetProperty;
 static MacWSAudioUnitGetPropertyFn gMacWSAudioUnitGetProperty;
+static MacWSAudioOutputUnitStartFn gMacWSOriginalAudioOutputUnitStart;
+static MacWSAudioOutputUnitStopFn gMacWSOriginalAudioOutputUnitStop;
+static MacWSAudioComponentInstanceDisposeFn
+    gMacWSOriginalAudioComponentInstanceDispose;
 static _Atomic(bool) gMacWSAudioHookInstalled;
 static _Atomic(uint32_t) gMacWSAudioProducerSerial = 1;
 static uint64_t gMacWSAudioOwnerSilenceTicks;
+static pthread_mutex_t gMacWSAudioContextsLock = PTHREAD_MUTEX_INITIALIZER;
+static MacWSAudioRenderContext *gMacWSAudioContexts;
+static _Atomic(int) gMacWSSoftwareCadenceMode = -1;
+
+static BOOL MacWSAudioBridgeProcessEligible(void) {
+    const char *program = getprogname();
+    return !(program && (strcmp(program, "coreaudiod") == 0 ||
+                         strcmp(program, "AudioComponentRegistrar") == 0));
+}
+
+static BOOL MacWSNeedsSoftwareAudioCadence(void) {
+    int cached = atomic_load_explicit(&gMacWSSoftwareCadenceMode,
+                                      memory_order_acquire);
+    if (cached >= 0) return cached != 0;
+    char machine[64] = {0};
+    size_t length = sizeof(machine);
+    BOOL enabled = sysctlbyname("hw.machine", machine, &length, NULL, 0) == 0 &&
+        strcmp(machine, "iPad14,5") == 0;
+    int expected = -1;
+    if (atomic_compare_exchange_strong_explicit(
+            &gMacWSSoftwareCadenceMode, &expected, enabled ? 1 : 0,
+            memory_order_acq_rel, memory_order_acquire)) {
+        fprintf(stderr,
+                "#### MACWS-AUDIO cadence=%s machine=%s\n",
+                enabled ? "software" : "hal",
+                machine[0] ? machine : "<unknown>");
+    }
+    return atomic_load_explicit(&gMacWSSoftwareCadenceMode,
+                                memory_order_acquire) != 0;
+}
+
+static MacWSAudioRenderContext *MacWSFindAudioContext(AudioUnit unit) {
+    MacWSAudioRenderContext *match = NULL;
+    pthread_mutex_lock(&gMacWSAudioContextsLock);
+    for (MacWSAudioRenderContext *context = gMacWSAudioContexts;
+         context; context = context->next) {
+        if (context->unit == unit) {
+            match = context;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&gMacWSAudioContextsLock);
+    return match;
+}
+
+static void MacWSRegisterAudioContext(MacWSAudioRenderContext *context) {
+    if (!context) return;
+    pthread_mutex_lock(&gMacWSAudioContextsLock);
+    context->next = gMacWSAudioContexts;
+    gMacWSAudioContexts = context;
+    pthread_mutex_unlock(&gMacWSAudioContextsLock);
+}
+
+static void MacWSUnregisterAudioContext(MacWSAudioRenderContext *context) {
+    if (!context) return;
+    pthread_mutex_lock(&gMacWSAudioContextsLock);
+    MacWSAudioRenderContext **cursor = &gMacWSAudioContexts;
+    while (*cursor && *cursor != context) cursor = &(*cursor)->next;
+    if (*cursor == context) *cursor = context->next;
+    context->next = NULL;
+    pthread_mutex_unlock(&gMacWSAudioContextsLock);
+}
 
 static BOOL MacWSAudioContextOwnsRing(MacWSAudioRenderContext *context,
                                      uint16_t peak,
@@ -220,6 +297,218 @@ static OSStatus MacWSAudioRenderCallback(
     return status;
 }
 
+static AudioBufferList *MacWSCreateSoftwareAudioBuffers(
+        const AudioStreamBasicDescription *format, UInt32 frames) {
+    if (!format || !frames || format->mChannelsPerFrame == 0 ||
+        format->mChannelsPerFrame > 32)
+        return NULL;
+    BOOL nonInterleaved =
+        (format->mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0;
+    UInt32 bufferCount = nonInterleaved ? format->mChannelsPerFrame : 1;
+    size_t listBytes = offsetof(AudioBufferList, mBuffers) +
+        (size_t)bufferCount * sizeof(AudioBuffer);
+    AudioBufferList *buffers = calloc(1, listBytes);
+    if (!buffers) return NULL;
+    UInt32 bytesPerBuffer = frames * format->mBytesPerFrame;
+    if (bytesPerBuffer == 0) {
+        UInt32 bytesPerSample = format->mBitsPerChannel / 8;
+        bytesPerBuffer = frames * bytesPerSample *
+            (nonInterleaved ? 1 : format->mChannelsPerFrame);
+    }
+    if (bytesPerBuffer == 0) {
+        free(buffers);
+        return NULL;
+    }
+    buffers->mNumberBuffers = bufferCount;
+    for (UInt32 index = 0; index < bufferCount; index++) {
+        buffers->mBuffers[index].mNumberChannels = nonInterleaved
+            ? 1 : format->mChannelsPerFrame;
+        buffers->mBuffers[index].mDataByteSize = bytesPerBuffer;
+        buffers->mBuffers[index].mData = calloc(1, bytesPerBuffer);
+        if (!buffers->mBuffers[index].mData) {
+            for (UInt32 previous = 0; previous < index; previous++)
+                free(buffers->mBuffers[previous].mData);
+            free(buffers);
+            return NULL;
+        }
+    }
+    return buffers;
+}
+
+static void MacWSDestroySoftwareAudioBuffers(AudioBufferList *buffers) {
+    if (!buffers) return;
+    for (UInt32 index = 0; index < buffers->mNumberBuffers; index++)
+        free(buffers->mBuffers[index].mData);
+    free(buffers);
+}
+
+static void *MacWSSoftwareAudioCadenceMain(void *reference) {
+    MacWSAudioRenderContext *context = reference;
+    pthread_setname_np("macws.audio.cadence");
+    const UInt32 frames = 512;
+    AudioBufferList *buffers = MacWSCreateSoftwareAudioBuffers(
+        &context->format, frames);
+    if (!buffers) {
+        atomic_store_explicit(&context->softwareCadenceRunning, false,
+                              memory_order_release);
+        return NULL;
+    }
+    double sampleRate = context->format.mSampleRate;
+    if (sampleRate < 1.0) sampleRate = MACWS_AUDIO_SAMPLE_RATE;
+    uint64_t quantumNanoseconds = (uint64_t)(
+        (long double)frames * 1000000000.0L / sampleRate);
+    if (quantumNanoseconds == 0) quantumNanoseconds = 1;
+    mach_timebase_info_data_t timebase = {0};
+    if (mach_timebase_info(&timebase) != KERN_SUCCESS ||
+        timebase.numer == 0 || timebase.denom == 0) {
+        timebase.numer = 1;
+        timebase.denom = 1;
+    }
+    uint64_t quantumTicks = (uint64_t)(
+        (long double)quantumNanoseconds * timebase.denom / timebase.numer);
+    if (quantumTicks == 0) quantumTicks = 1;
+    uint64_t nextDeadline = mach_absolute_time();
+    Float64 sampleTime = 0;
+    unsigned failures = 0;
+    while (atomic_load_explicit(&context->softwareCadenceRunning,
+                                memory_order_acquire)) {
+        for (UInt32 index = 0; index < buffers->mNumberBuffers; index++) {
+            memset(buffers->mBuffers[index].mData, 0,
+                   buffers->mBuffers[index].mDataByteSize);
+        }
+        AudioTimeStamp timestamp = {
+            .mSampleTime = sampleTime,
+            .mHostTime = mach_absolute_time(),
+            .mFlags = kAudioTimeStampSampleTimeValid |
+                      kAudioTimeStampHostTimeValid,
+        };
+        AudioUnitRenderActionFlags flags = 0;
+        OSStatus status = context->original
+            ? context->original(context->originalContext, &flags, &timestamp,
+                                0, frames, buffers)
+            : kAudio_ParamError;
+        if (status == noErr) {
+            MacWSPublishAudio(context, buffers, frames);
+        } else if (failures++ < 3) {
+            fprintf(stderr,
+                    "#### MACWS-AUDIO software callback status=%d unit=%p\n",
+                    (int)status, context->unit);
+        }
+        sampleTime += frames;
+        // mach_wait_until from the Ventura libsystem does not share the same
+        // deadline epoch with the iOS 16.0 kernel on this device: a runtime
+        // sample caught the cadence thread parked in that trap for 13+ s.
+        // Relative POSIX sleep crosses the chroot boundary correctly, but the
+        // old loop slept a full quantum *after* doing the render work. Runtime
+        // evidence on iPad14,5 was:
+        //   AUDIO-RATE elapsed=5.005408 write_delta=202240
+        //   producer_fps=40404.295 callback_delta=395 callback_hz=78.915
+        //   underrun_delta=91 owner_pid=39125
+        // Accumulate the intended absolute schedule in mach ticks, then use
+        // only a relative nanosleep for the remaining interval. This keeps
+        // callback execution time out of the 48-kHz cadence without entering
+        // the incompatible mach_wait_until trap. A long scheduler stall is
+        // bounded to eight catch-up quanta instead of producing an unbounded
+        // callback burst.
+        nextDeadline += quantumTicks;
+        for (;;) {
+            if (!atomic_load_explicit(&context->softwareCadenceRunning,
+                                      memory_order_acquire))
+                break;
+            uint64_t now = mach_absolute_time();
+            if (now >= nextDeadline) {
+                if (now - nextDeadline > quantumTicks * 8)
+                    nextDeadline = now;
+                break;
+            }
+            uint64_t remainingTicks = nextDeadline - now;
+            uint64_t remainingNanoseconds = (uint64_t)(
+                (long double)remainingTicks * timebase.numer /
+                timebase.denom);
+            if (remainingNanoseconds == 0) break;
+            struct timespec remaining = {
+                .tv_sec = (time_t)(remainingNanoseconds / 1000000000ULL),
+                .tv_nsec = (long)(remainingNanoseconds % 1000000000ULL),
+            };
+            (void)nanosleep(&remaining, NULL);
+        }
+    }
+    MacWSDestroySoftwareAudioBuffers(buffers);
+    return NULL;
+}
+
+static OSStatus MacWSAudioOutputUnitStart(AudioUnit unit) {
+    MacWSAudioRenderContext *context = MacWSFindAudioContext(unit);
+    if (!context || !MacWSNeedsSoftwareAudioCadence()) {
+        return gMacWSOriginalAudioOutputUnitStart
+            ? gMacWSOriginalAudioOutputUnitStart(unit) : kAudio_ParamError;
+    }
+    if (context->softwareCadenceThreadCreated) return noErr;
+    atomic_store_explicit(&context->softwareCadenceRunning, true,
+                          memory_order_release);
+    int error = pthread_create(&context->softwareCadenceThread, NULL,
+                               MacWSSoftwareAudioCadenceMain, context);
+    if (error != 0) {
+        atomic_store_explicit(&context->softwareCadenceRunning, false,
+                              memory_order_release);
+        fprintf(stderr,
+                "#### MACWS-AUDIO software cadence start failed error=%d "
+                "unit=%p\n", error, unit);
+        return kAudio_ParamError;
+    }
+    context->softwareCadenceThreadCreated = true;
+    fprintf(stderr,
+            "#### MACWS-AUDIO software cadence started unit=%p rate=%.0f "
+            "channels=%u\n", unit, context->format.mSampleRate,
+            (unsigned)context->format.mChannelsPerFrame);
+    return noErr;
+}
+
+static OSStatus MacWSAudioOutputUnitStop(AudioUnit unit) {
+    MacWSAudioRenderContext *context = MacWSFindAudioContext(unit);
+    if (!context || !MacWSNeedsSoftwareAudioCadence()) {
+        return gMacWSOriginalAudioOutputUnitStop
+            ? gMacWSOriginalAudioOutputUnitStop(unit) : kAudio_ParamError;
+    }
+    if (context->softwareCadenceThreadCreated) {
+        atomic_store_explicit(&context->softwareCadenceRunning, false,
+                              memory_order_release);
+        pthread_join(context->softwareCadenceThread, NULL);
+        context->softwareCadenceThreadCreated = false;
+        fprintf(stderr,
+                "#### MACWS-AUDIO software cadence stopped unit=%p\n", unit);
+    }
+    return noErr;
+}
+
+static OSStatus MacWSAudioComponentInstanceDispose(
+        AudioComponentInstance instance) {
+    MacWSAudioRenderContext *context = MacWSFindAudioContext(instance);
+    if (context) {
+        // Do not forward a second stop during ordinary M1 disposal.  Only the
+        // M2 software backend owns a thread that must be joined here when a
+        // client disposes without first calling AudioOutputUnitStop.
+        if (context->softwareCadenceThreadCreated) {
+            atomic_store_explicit(&context->softwareCadenceRunning, false,
+                                  memory_order_release);
+            pthread_join(context->softwareCadenceThread, NULL);
+            context->softwareCadenceThreadCreated = false;
+        }
+        MacWSUnregisterAudioContext(context);
+    }
+    OSStatus status = gMacWSOriginalAudioComponentInstanceDispose
+        ? gMacWSOriginalAudioComponentInstanceDispose(instance)
+        : kAudio_ParamError;
+    if (context) {
+        if (context->ring) {
+            munmap(context->ring, (size_t)MacWSAudioRingBytes(
+                MACWS_AUDIO_RING_CAPACITY_FRAMES));
+        }
+        free(context);
+    }
+    return status;
+}
+
 static OSStatus MacWSAudioUnitSetProperty(
         AudioUnit unit, AudioUnitPropertyID property,
         AudioUnitScope scope, AudioUnitElement element,
@@ -255,6 +544,7 @@ static OSStatus MacWSAudioUnitSetProperty(
     }
     context->original = callback->inputProc;
     context->originalContext = callback->inputProcRefCon;
+    context->unit = unit;
     context->producerToken = ((uint64_t)(uint32_t)getpid() << 32) |
         atomic_fetch_add_explicit(&gMacWSAudioProducerSerial, 1,
                                   memory_order_relaxed);
@@ -274,10 +564,12 @@ static OSStatus MacWSAudioUnitSetProperty(
     OSStatus status = gMacWSOriginalAudioUnitSetProperty(
         unit, property, scope, element, &wrapped, sizeof(wrapped));
     if (status != noErr) free(context);
+    else MacWSRegisterAudioContext(context);
     return status;
 }
 
 void MacWSInstallAudioRenderBridge(void) {
+    if (!MacWSAudioBridgeProcessEligible()) return;
     bool expected = false;
     if (!atomic_compare_exchange_strong(
             &gMacWSAudioHookInstalled, &expected, true))
@@ -285,12 +577,22 @@ void MacWSInstallAudioRenderBridge(void) {
     void *setProperty = dlsym(RTLD_DEFAULT, "AudioUnitSetProperty");
     gMacWSAudioUnitGetProperty = (MacWSAudioUnitGetPropertyFn)
         dlsym(RTLD_DEFAULT, "AudioUnitGetProperty");
-    if (!setProperty || !gMacWSAudioUnitGetProperty) {
+    void *start = dlsym(RTLD_DEFAULT, "AudioOutputUnitStart");
+    void *stop = dlsym(RTLD_DEFAULT, "AudioOutputUnitStop");
+    void *dispose = dlsym(RTLD_DEFAULT, "AudioComponentInstanceDispose");
+    if (!setProperty || !gMacWSAudioUnitGetProperty || !start || !stop ||
+        !dispose) {
         atomic_store(&gMacWSAudioHookInstalled, false);
         return;
     }
     MSHookFunction(setProperty, (void *)MacWSAudioUnitSetProperty,
                    (void **)&gMacWSOriginalAudioUnitSetProperty);
+    MSHookFunction(start, (void *)MacWSAudioOutputUnitStart,
+                   (void **)&gMacWSOriginalAudioOutputUnitStart);
+    MSHookFunction(stop, (void *)MacWSAudioOutputUnitStop,
+                   (void **)&gMacWSOriginalAudioOutputUnitStop);
+    MSHookFunction(dispose, (void *)MacWSAudioComponentInstanceDispose,
+                   (void **)&gMacWSOriginalAudioComponentInstanceDispose);
 }
 
 __attribute__((constructor)) static void MacWSInitializeAudioRenderBridge(void) {
@@ -298,10 +600,7 @@ __attribute__((constructor)) static void MacWSInitializeAudioRenderBridge(void) 
     // launched from Finder/Terminal rather than the curated launcher. The
     // native output daemon consumes this ring outside the chroot; the two
     // macOS audio catalog/HAL servers are not playback clients themselves.
-    const char *program = getprogname();
-    if (program && (strcmp(program, "coreaudiod") == 0 ||
-                    strcmp(program, "AudioComponentRegistrar") == 0))
-        return;
+    if (!MacWSAudioBridgeProcessEligible()) return;
     mach_timebase_info_data_t timebase = {0};
     if (mach_timebase_info(&timebase) == KERN_SUCCESS &&
         timebase.numer != 0) {

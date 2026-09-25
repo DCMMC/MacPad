@@ -83,6 +83,7 @@ LSD_PLIST="$GUI_LAUNCHD_DIR/com.macwsguide.lsd.plist"
 LSD_SYSTEM_PLIST="$GUI_LAUNCHD_DIR/com.macwsguide.lsd-system.plist"
 CFPREFSD_DAEMON_PLIST="$GUI_LAUNCHD_DIR/com.macwsguide.cfprefsd-daemon.plist"
 CFPREFSD_AGENT_PLIST="$GUI_LAUNCHD_DIR/com.macwsguide.cfprefsd-agent.plist"
+CFPREFSD_MOBILE_AGENT_PLIST="$GUI_LAUNCHD_DIR/com.macwsguide.cfprefsd-mobile-agent.plist"
 COREAUDIOD_PLIST="$GUI_LAUNCHD_DIR/com.macwsguide.coreaudiod.plist"
 AUDIO_COMPONENT_REGISTRAR_PLIST="$GUI_LAUNCHD_DIR/com.macwsguide.audiocomponentregistrar.plist"
 AUDIO_OUTPUT_PLIST="$GUI_LAUNCHD_DIR/com.macwsguide.audio-output.plist"
@@ -119,6 +120,7 @@ LSD_LABEL=com.macwsguide.lsd
 LSD_SYSTEM_LABEL=com.macwsguide.lsd-system
 CFPREFSD_DAEMON_LABEL=com.macwsguide.cfprefsd-daemon
 CFPREFSD_AGENT_LABEL=com.macwsguide.cfprefsd-agent
+CFPREFSD_MOBILE_AGENT_LABEL=com.macwsguide.cfprefsd-mobile-agent
 COREAUDIOD_LABEL=com.apple.audio.coreaudiod
 AUDIO_COMPONENT_REGISTRAR_LABEL=com.apple.macosbooter.audio.AudioComponentRegistrar
 AUDIO_OUTPUT_LABEL=com.macwsguide.audio-output
@@ -1762,12 +1764,33 @@ ensure_cfprefsd_dirhelper_tree() {
     local temporary_root="$ROOTFS/private/var/.TemporaryItems"
     local temporary_user="$temporary_root/folders.0"
     local temporary_leaf="$temporary_user/TemporaryItems"
+    local temporary_mobile="$temporary_root/folders.501"
+    local temporary_mobile_leaf="$temporary_mobile/TemporaryItems"
+    local mobile_home="$ROOTFS/Users/mobile"
+    local mobile_library="$mobile_home/Library"
+    local mobile_preferences="$mobile_library/Preferences"
+    local mobile_user_root="$ROOTFS/var/folders/zz/macws_uid501"
+    local mobile_user_dir="$mobile_user_root/0"
+    local mobile_cache_dir="$mobile_user_root/C"
+    local mobile_temp_dir="$mobile_user_root/T"
 
-    mkdir -p "$temporary_leaf" || return 1
+    mkdir -p "$temporary_leaf" "$temporary_mobile_leaf" \
+        "$mobile_preferences" "$mobile_user_dir" "$mobile_cache_dir" \
+        "$mobile_temp_dir" || return 1
     chown root:wheel "$temporary_root" "$temporary_user" "$temporary_leaf" \
         2>/dev/null || true
+    chown 501:501 "$temporary_mobile" "$temporary_mobile_leaf" \
+        "$mobile_home" "$mobile_library" "$mobile_preferences" \
+        "$mobile_user_root" "$mobile_user_dir" "$mobile_cache_dir" \
+        "$mobile_temp_dir" \
+        2>/dev/null || return 1
     chmod 1311 "$temporary_root" || return 1
     chmod 0700 "$temporary_user" "$temporary_leaf" || return 1
+    chmod 0700 "$temporary_mobile" "$temporary_mobile_leaf" \
+        "$mobile_preferences" || return 1
+    chmod 0755 "$mobile_home" "$mobile_library" || return 1
+    chmod 0700 "$mobile_user_root" "$mobile_user_dir" \
+        "$mobile_cache_dir" "$mobile_temp_dir" || return 1
 }
 
 ensure_launchservices_session_user_dir() {
@@ -2274,6 +2297,43 @@ PLIST
     <key>KeepAlive</key><false/>
     <key>StandardOutPath</key><string>${LOGDIR}/cfprefsd-agent.log</string>
     <key>StandardErrorPath</key><string>${LOGDIR}/cfprefsd-agent.log</string>
+</dict>
+</plist>
+PLIST
+
+    # Steam's production game process runs as uid 501, matching the iPadOS
+    # mobile account.  The restored Ventura image has no uid-501 login domain,
+    # so publish the same unmodified cfprefsd agent protocol on a distinct
+    # bootstrap name and give only this job the narrowly scoped synthetic
+    # login identity supplied by libmachook.  Root desktop clients continue to
+    # use the established agent above.
+    cat > "$CFPREFSD_MOBILE_AGENT_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>${CFPREFSD_MOBILE_AGENT_LABEL}</string>
+    <key>POSIXSpawnType</key><string>Adaptive</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${CHROOTEXEC}</string><string>501</string><string>501</string>
+        <string>${ROOTFS}</string><string>${CFPREFSD_BIN}</string>
+        <string>agent</string>
+    </array>
+    <key>MachServices</key>
+    <dict><key>com.apple.macosbooter.cfprefsd.agent.501</key><true/></dict>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MACWS_SYNTHETIC_MOBILE_USER</key><string>1</string>
+        <key>HOME</key><string>/Users/mobile</string>
+        <key>USER</key><string>mobile</string>
+        <key>LOGNAME</key><string>mobile</string>
+    </dict>
+    <key>EnableTransactions</key><true/>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><false/>
+    <key>StandardOutPath</key><string>${LOGDIR}/cfprefsd-mobile-agent.log</string>
+    <key>StandardErrorPath</key><string>${LOGDIR}/cfprefsd-mobile-agent.log</string>
 </dict>
 </plist>
 PLIST
@@ -3699,6 +3759,16 @@ run_defaults_utility() {
         "$CHROOTEXEC" 0 0 "$ROOTFS" "$DEFAULTS_BIN" "$@"
 }
 
+run_mobile_defaults_utility() {
+    # Exercise the exact uid, identity and private endpoint inherited by the
+    # prepared 7DTD process.  This remains a stock `defaults`/cfprefsd
+    # round-trip; no preference result is synthesized by libmachook.
+    HOME=/Users/mobile USER=mobile LOGNAME=mobile \
+        MACWS_CFPREFERENCES_CLIENT=1 MACWS_SYNTHETIC_MOBILE_USER=1 \
+        /var/jb/usr/bin/timeout -k 2 15 \
+        "$CHROOTEXEC" 501 501 "$ROOTFS" "$DEFAULTS_BIN" "$@"
+}
+
 verify_preferences_persistence() {
     local value="" mission_control="" app_expose=""
     local dock_magnification="" dock_large_size="" dock_minimize_effect=""
@@ -3767,6 +3837,27 @@ verify_preferences_persistence() {
         return 1
     fi
     log "Private macOS CFPreferences database ready; native gestures, Genie minimize and maximum Dock hover magnification enabled."
+}
+
+verify_mobile_preferences_persistence() {
+    local value=""
+    rm -f "$LOGDIR/cfprefsd-mobile-probe.log"
+    if ! run_mobile_defaults_utility write \
+            com.macwsguide.bootstrap.mobile PersistentPreferencesReady \
+            -bool true > "$LOGDIR/cfprefsd-mobile-probe.log" 2>&1; then
+        log "ERROR: uid-501 macOS CFPreferences write failed."
+        tail -n 20 "$LOGDIR/cfprefsd-mobile-probe.log" 2>/dev/null || true
+        return 1
+    fi
+    value=$(run_mobile_defaults_utility read \
+        com.macwsguide.bootstrap.mobile PersistentPreferencesReady 2>> \
+        "$LOGDIR/cfprefsd-mobile-probe.log") || value=""
+    if [ "$value" != 1 ]; then
+        log "ERROR: uid-501 macOS CFPreferences domain is not persistent (read='$value')."
+        tail -n 20 "$LOGDIR/cfprefsd-mobile-probe.log" 2>/dev/null || true
+        return 1
+    fi
+    log "uid-501 macOS CFPreferences write/read round-trip ready."
 }
 
 apply_workspace_wallpaper() {
@@ -4031,11 +4122,19 @@ repair_desktop() {
     # Preferences and LaunchServices are upstream of IconServices and Dock.
     # Preserve a healthy generation; recreate only a missing/dormant one so
     # existing applications keep their live service connections.
+    ensure_cfprefsd_dirhelper_tree || {
+        log "ERROR: could not repair the CFPreferences atomic-write hierarchy."
+        return 1
+    }
     ensure_desktop_job "$CFPREFSD_DAEMON_PLIST" \
         "$CFPREFSD_DAEMON_LABEL" "macOS CFPreferences daemon" || return 1
     ensure_desktop_job "$CFPREFSD_AGENT_PLIST" \
         "$CFPREFSD_AGENT_LABEL" "macOS CFPreferences agent" || return 1
+    ensure_desktop_job "$CFPREFSD_MOBILE_AGENT_PLIST" \
+        "$CFPREFSD_MOBILE_AGENT_LABEL" \
+        "uid-501 macOS CFPreferences agent" || return 1
     verify_preferences_persistence || return 1
+    verify_mobile_preferences_persistence || return 1
     log "TIMING desktop-repair stage=preferences seconds=$((SECONDS - stage_started)) total=$((SECONDS - repair_started))"
     stage_started=$SECONDS
     ensure_desktop_job "$LSD_SYSTEM_PLIST" "$LSD_SYSTEM_LABEL" \
@@ -4451,9 +4550,11 @@ start_macos() {
         log "ERROR: could not prepare the CFPreferences atomic-write hierarchy."
         return 1
     }
-    rm -f "$LOGDIR/cfprefsd-daemon.log" "$LOGDIR/cfprefsd-agent.log"
+    rm -f "$LOGDIR/cfprefsd-daemon.log" "$LOGDIR/cfprefsd-agent.log" \
+        "$LOGDIR/cfprefsd-mobile-agent.log"
     launchctl load "$CFPREFSD_DAEMON_PLIST" || return 1
     launchctl load "$CFPREFSD_AGENT_PLIST" || return 1
+    launchctl load "$CFPREFSD_MOBILE_AGENT_PLIST" || return 1
     launchctl list "$CFPREFSD_DAEMON_LABEL" >/dev/null 2>&1 || {
         log "ERROR: private macOS cfprefsd daemon contract was not registered."
         return 1
@@ -4462,7 +4563,12 @@ start_macos() {
         log "ERROR: private macOS cfprefsd agent contract was not registered."
         return 1
     }
+    launchctl list "$CFPREFSD_MOBILE_AGENT_LABEL" >/dev/null 2>&1 || {
+        log "ERROR: uid-501 macOS cfprefsd agent contract was not registered."
+        return 1
+    }
     verify_preferences_persistence || return 1
+    verify_mobile_preferences_persistence || return 1
 
     # Ventura's AudioComponentRegistrar must own a collision-free endpoint:
     # runtime-confirmed on 2026-09-15, the native iPadOS registrar returned its
